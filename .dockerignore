@@ -1,0 +1,6 @@
+target
+.git
+.env
+password.secret
+data
+*.db*

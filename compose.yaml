@@ -1,0 +1,23 @@
+services:
+  rustclipsync:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8090:8090"
+    environment:
+      RCS_USER: ${RCS_USER:?set RCS_USER}
+      RCS_PASSWORD_FILE: /run/secrets/rcs_password
+    secrets:
+      - rcs_password
+    volumes:
+      - clipsync_data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+secrets:
+  rcs_password:
+    file: ./password.secret
+volumes:
+  clipsync_data:
+    name: rustclipsync_data
