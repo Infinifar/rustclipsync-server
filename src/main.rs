@@ -75,6 +75,7 @@ struct App {
     db: Mutex<Connection>,
     user: String,
     password: String,
+    dedupe_window_seconds: u32,
     events: broadcast::Sender<Profile>,
     tokens: Mutex<HashMap<String, Instant>>,
 }
@@ -261,6 +262,30 @@ async fn commit(State(app): State<Shared>, headers: HeaderMap, body: Bytes) -> A
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
     let profile = normalize(incoming, &full)?;
+    let previous: Option<String> = tx
+        .query_row("SELECT profile FROM current WHERE id=1", [], |r| r.get(0))
+        .optional()
+        .map_err(db_error)?;
+    if let Some(previous) = previous {
+        let previous: Profile =
+            serde_json::from_str(&previous).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let duplicate = previous.hash == profile.hash
+            && previous
+                .synced_at
+                .zip(profile.synced_at)
+                .is_some_and(|(old, now)| {
+                    let elapsed = now.signed_duration_since(old).num_milliseconds();
+                    elapsed >= 0 && elapsed < i64::from(app.dedupe_window_seconds) * 1000
+                });
+        if duplicate {
+            if let Some(name) = &profile.data_name {
+                tx.execute("DELETE FROM pending WHERE name=?1", [name])
+                    .map_err(db_error)?;
+            }
+            tx.commit().map_err(db_error)?;
+            return Ok(StatusCode::OK.into_response());
+        }
+    }
     let serialized =
         serde_json::to_string(&profile).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     tx.execute("INSERT INTO history(hash,profile,data) VALUES(?1,?2,?3) ON CONFLICT(hash) DO UPDATE SET profile=excluded.profile", params![profile.hash, serialized, full]).map_err(db_error)?;
@@ -510,6 +535,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !(1..=3650).contains(&retention_days) {
         return Err("RCS_HISTORY_RETENTION_DAYS must be an integer from 1 to 3650".into());
     }
+    let dedupe_window_seconds: u32 = env::var("RCS_DEDUP_WINDOW_SECONDS")
+        .unwrap_or_else(|_| "60".into())
+        .parse()
+        .map_err(|_| "RCS_DEDUP_WINDOW_SECONDS must be an integer from 0 to 86400")?;
+    if dedupe_window_seconds > 86400 {
+        return Err("RCS_DEDUP_WINDOW_SECONDS must be an integer from 0 to 86400".into());
+    }
     let listen: SocketAddr = env::var("RCS_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8090".into())
         .parse()?;
@@ -518,6 +550,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db: Mutex::new(database::open(&path, &db_key)?),
         user,
         password,
+        dedupe_window_seconds,
         events,
         tokens: Mutex::new(HashMap::new()),
     });
@@ -590,6 +623,7 @@ mod tests {
             db: Mutex::new(db),
             user: "test".into(),
             password: "long-password".into(),
+            dedupe_window_seconds: 60,
             events,
             tokens: Mutex::new(HashMap::new()),
         })
@@ -609,6 +643,133 @@ mod tests {
             .oneshot(request.body(Body::from(body)).unwrap())
             .await
             .unwrap()
+    }
+    #[tokio::test]
+    async fn duplicate_current_is_suppressed_but_changes_and_expired_repeat_are_broadcast() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let app = router(state.clone());
+        let profile = |text: &str| {
+            json!({"type":"Text","hash":digest(text.as_bytes()),"text":text,"hasData":false})
+                .to_string()
+                .into_bytes()
+        };
+        assert_eq!(
+            call(&app, Method::PUT, "/SyncClipboard.json", profile("A"), true)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert!(events.try_recv().is_ok());
+        assert_eq!(
+            call(&app, Method::PUT, "/SyncClipboard.json", profile("A"), true)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert!(events.try_recv().is_err());
+        for text in ["B", "A"] {
+            assert_eq!(
+                call(
+                    &app,
+                    Method::PUT,
+                    "/SyncClipboard.json",
+                    profile(text),
+                    true
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+            assert!(events.try_recv().is_ok());
+        }
+        state
+            .db
+            .lock()
+            .await
+            .execute(
+                "UPDATE current SET profile=json_set(profile,'$.syncedAt','2000-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            call(&app, Method::PUT, "/SyncClipboard.json", profile("A"), true)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert!(events.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn duplicate_long_text_removes_pending_without_event() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let app = router(state.clone());
+        let text = "test long text";
+        let name = "duplicate.txt";
+        let body = json!({"type":"Text","hash":digest(text.as_bytes()),"text":"test","hasData":true,"dataName":name}).to_string().into_bytes();
+        for attempt in 0..2 {
+            assert_eq!(
+                call(
+                    &app,
+                    Method::PUT,
+                    "/file/duplicate.txt",
+                    text.as_bytes().to_vec(),
+                    true
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+            assert_eq!(
+                call(&app, Method::PUT, "/SyncClipboard.json", body.clone(), true)
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            assert_eq!(events.try_recv().is_ok(), attempt == 0);
+            let count: i64 = state
+                .db
+                .lock()
+                .await
+                .query_row("SELECT count(*) FROM pending", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_duplicate_is_atomic_and_zero_disables_filter() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let app = router(state.clone());
+        let body = json!({"type":"Text","hash":digest(b"same"),"text":"same","hasData":false})
+            .to_string()
+            .into_bytes();
+        let (first, second) = tokio::join!(
+            call(&app, Method::PUT, "/SyncClipboard.json", body.clone(), true),
+            call(&app, Method::PUT, "/SyncClipboard.json", body.clone(), true),
+        );
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::OK);
+        assert!(events.try_recv().is_ok());
+        assert!(events.try_recv().is_err());
+
+        let mut unshared = Arc::try_unwrap(test_state()).ok().unwrap();
+        unshared.dedupe_window_seconds = 0;
+        let state = Arc::new(unshared);
+        let mut events = state.events.subscribe();
+        let app = router(state);
+        for _ in 0..2 {
+            assert_eq!(
+                call(&app, Method::PUT, "/SyncClipboard.json", body.clone(), true)
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            assert!(events.try_recv().is_ok());
+        }
     }
     #[tokio::test]
     async fn short_text_auth_and_hash() {
@@ -833,6 +994,7 @@ mod tests {
             db: Mutex::new(db),
             user: "test".into(),
             password: "long-password".into(),
+            dedupe_window_seconds: 60,
             events,
             tokens: Mutex::new(HashMap::new()),
         }));
