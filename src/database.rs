@@ -5,19 +5,21 @@ use rusqlite::{Connection, OpenFlags, params};
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub fn read_key() -> Result<String> {
-    let path = std::env::var("RCS_DB_KEY_FILE").map_err(|_| "RCS_DB_KEY_FILE is required")?;
-    let key = fs::read_to_string(path)?;
-    let key = key.trim_end_matches(['\r', '\n']);
+    let key = std::env::var("RCS_DB_KEY")
+        .map_err(|_| "RCS_DB_KEY is required and must be valid UTF-8")?;
+    validate_key(&key)?;
+    Ok(key)
+}
+
+fn validate_key(key: &str) -> Result<()> {
     if key.len() != 64 || !key.bytes().all(|c| c.is_ascii_hexdigit()) {
         return Err("database key must be exactly 64 hexadecimal characters".into());
     }
-    Ok(key.to_owned())
+    Ok(())
 }
 
 fn apply_key(db: &Connection, key: &str) -> Result<()> {
-    if key.len() != 64 || !key.bytes().all(|c| c.is_ascii_hexdigit()) {
-        return Err("invalid database key".into());
-    }
+    validate_key(key)?;
     let version: String = db.pragma_query_value(None, "cipher_version", |row| row.get(0))?;
     if version.is_empty() {
         return Err("SQLCipher is unavailable".into());
@@ -67,9 +69,7 @@ pub fn open(path: &Path, key: &str) -> Result<Connection> {
 
 /// Offline migration. Caller must stop all processes using the database first.
 pub fn migrate(path: &Path, key: &str) -> Result<()> {
-    if key.len() != 64 || !key.bytes().all(|c| c.is_ascii_hexdigit()) {
-        return Err("invalid database key".into());
-    }
+    validate_key(key)?;
     let backup = path.with_extension("db.plaintext-backup");
     let tmp = path.with_extension("db.encrypted-tmp");
     if backup.exists() || tmp.exists() {
@@ -151,6 +151,14 @@ pub fn migrate(path: &Path, key: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_environment_key_format() {
+        assert!(validate_key(&"ab".repeat(32)).is_ok());
+        assert!(validate_key(&"ab".repeat(31)).is_err());
+        assert!(validate_key(&"zz".repeat(32)).is_err());
+        assert!(validate_key(&("ab".repeat(32) + "\n")).is_err());
+    }
 
     #[test]
     fn encrypts_new_database_and_rejects_wrong_key() {

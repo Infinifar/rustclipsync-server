@@ -7,28 +7,28 @@ Small Rust server for the **text** subset used by [Omaclipsync](https://github.c
 要求 Docker Compose。创建只存在于本机的账户配置：
 
 ```sh
-printf 'RCS_USER=%s\n' 'your-user' > .env
 umask 077
+printf 'RCS_USER=%s\n' 'your-user' > .env
+printf 'RCS_DB_KEY=%s\n' "$(openssl rand -hex 32)" >> .env
 printf '%s' 'replace-with-a-long-random-password' > password.secret
-openssl rand -hex 32 > db.key
-sudo chgrp 10001 db.key password.secret
-chmod 0440 db.key password.secret
+sudo chgrp 10001 password.secret
+chmod 0440 password.secret
 docker compose up --build -d
 docker compose ps
 ```
 
-请换成自己的用户名和至少 12 字符的随机密码。数据库密钥 `db.key` 是 32 字节随机值的十六进制表示，必须保存在安全位置并单独备份；丢失密钥后无法恢复数据库。`password.secret`、`db.key`、`.env` 和数据库均不得提交。容器以 UID/GID 10001 读取密钥文件，父目录应限制为可信用户访问。可在 `.env` 设置 `RCS_DB_KEY_PATH` 指定密钥文件路径，不要把密钥本身写入 `.env`。Compose 只把 `8090` 映射到宿主机 `127.0.0.1`；远程 Omaclipsync 应通过现有 TLS 反向代理访问，并将 `/SyncClipboardHub` 的 WebSocket 升级转发到本服务。
+请换成自己的用户名和至少 12 字符的随机密码。`.env` 的 `RCS_DB_KEY` 是 32 字节随机值的 64 位十六进制表示，必须安全备份；丢失密钥后无法恢复数据库。`.env` 必须限制为可信用户访问，且不得提交。密钥作为容器环境变量，可被 Docker 管理员、Docker API 用户及有权读取进程环境的用户看到。容器以 GID 10001 读取密码文件；父目录应限制访问。已有数据库不能直接修改密钥值，需先进行数据库重新加密。Compose 只把 `8090` 映射到宿主机 `127.0.0.1`；远程 Omaclipsync 应通过现有 TLS 反向代理访问，并将 `/SyncClipboardHub` 的 WebSocket 升级转发到本服务。
 
 配置 Omaclipsync 时填写 HTTPS 基础 URL、用户名和密码。服务支持 URL 路径前缀，但代理必须统一转发 `/`、`/SyncClipboard.json`、`/file/`、`/api/history/` 和 `/SyncClipboardHub`。`GET /healthz` 不要求认证，仅返回 `ok`；其余接口需要 Basic 认证。
 
 源码运行：
 
 ```sh
-RCS_USER=your-user RCS_PASSWORD=replace-with-a-long-random-password RCS_DB_KEY_FILE=./db.key \
+RCS_USER=your-user RCS_PASSWORD=replace-with-a-long-random-password RCS_DB_KEY=your-64-hex-digit-key \
   RCS_DATA_DIR=./data cargo run --release
 ```
 
-默认监听 `127.0.0.1:8090`，容器内设置为 `0.0.0.0:8090`。`RCS_PASSWORD_FILE` 可替代 `RCS_PASSWORD`，适合 Docker secrets。数据库及 WAL 使用 SQLCipher 加密；`RCS_DB_KEY_FILE` 必须指向密钥文件。首次迁移前的明文备份及历史备份仍是明文，不会自动删除。
+默认监听 `127.0.0.1:8090`，容器内设置为 `0.0.0.0:8090`。`RCS_PASSWORD_FILE` 可替代 `RCS_PASSWORD`，适合 Docker secrets。数据库及 WAL 使用 SQLCipher 加密；密钥通过 `RCS_DB_KEY` 提供。首次迁移前的明文备份及历史备份仍是明文，不会自动删除。
 
 升级已有明文数据库时，先备份数据卷和密钥，停止所有访问数据库的进程，然后用新镜像执行一次 `docker compose run --rm --no-deps rustclipsync --migrate-db`，成功后再 `docker compose up -d`。迁移会校验源数据库，生成并校验加密副本，再将原文件保留为 `clipsync.db.plaintext-backup`。迁移中断时保留的临时文件或备份需要先人工检查，不要覆盖。SQLCipher 加密保护静态存储，进程运行期间及持有密钥的用户仍可读取数据；它不是端到端加密。
 
@@ -51,7 +51,7 @@ docker compose start
 
 ## English
 
-Create `.env` with `RCS_USER`, a private `password.secret`, and a separate `db.key` containing 32 random bytes in hexadecimal. The container's GID 10001 must be able to read both secret files. Back up the database key securely: losing it makes the encrypted database unreadable. Set `RCS_DB_KEY_PATH` in `.env` to override the key file path, and `RCS_HISTORY_RETENTION_DAYS` to configure retention (default 7 days). The published port is bound to loopback. For an existing plaintext database, stop the service, back it up, then run `docker compose run --rm --no-deps rustclipsync --migrate-db` before restarting. The original plaintext database remains as `clipsync.db.plaintext-backup`; protect and handle it separately. SQLCipher encrypts storage, not end-to-end traffic. Put a TLS reverse proxy in front of the service and forward WebSocket upgrades.
+Create `.env` with `RCS_USER` and `RCS_DB_KEY` (64 hexadecimal characters from 32 random bytes), and a private `password.secret` readable by GID 10001. Protect and back up `.env`: the database is unreadable without its key. Container environment variables are visible to Docker administrators and other users with sufficient access. Changing the key value alone does not re-encrypt existing data. Set `RCS_HISTORY_RETENTION_DAYS` to configure retention (default 7 days). The published port is bound to loopback. For an existing plaintext database, stop the service, back it up, then run `docker compose run --rm --no-deps rustclipsync --migrate-db` before restarting. The original plaintext database remains as `clipsync.db.plaintext-backup`; protect and handle it separately. SQLCipher encrypts storage, not end-to-end traffic. Put a TLS reverse proxy in front of the service and forward WebSocket upgrades.
 
 ## Development
 
