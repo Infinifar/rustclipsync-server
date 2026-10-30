@@ -7,6 +7,7 @@ services:
     environment:
       RCS_USER: ${RCS_USER:?set RCS_USER}
       RCS_PASSWORD_FILE: /run/secrets/rcs_password
+      RCS_HISTORY_RETENTION_DAYS: ${RCS_HISTORY_RETENTION_DAYS:-7}
     secrets:
       - rcs_password
     volumes:

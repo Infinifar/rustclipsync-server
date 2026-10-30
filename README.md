@@ -27,6 +27,8 @@ RCS_USER=your-user RCS_PASSWORD=replace-with-a-long-random-password \
 
 默认监听 `127.0.0.1:8090`，容器内设置为 `0.0.0.0:8090`。`RCS_PASSWORD_FILE` 可替代 `RCS_PASSWORD`，适合 Docker secrets。数据文件是 `RCS_DATA_DIR/clipsync.db` 及其 WAL 文件；请使用持久卷。
 
+历史默认保留 7 天，可在 Compose 的 `.env` 中设置 `RCS_HISTORY_RETENTION_DAYS=30`（允许 1 至 3650 天）。服务启动时和之后每小时清理过期历史，始终保留当前剪贴板及时间无法解析的记录。过期时间按最后一次同步的时间计算；修改 `.env` 后需要重新创建容器。清理会永久删除对应历史，SQLite 文件或备份中可能仍有残留，因此不应将此功能视为安全擦除。
+
 ## 协议和限制
 
 实现 `GET /`、`GET`/`PUT /SyncClipboard.json`、`PUT`/`GET`/`HEAD /file/{name}`、`GET /api/history/Text-{hash}` 与 `/data`、SignalR v1 的协商和 JSON WebSocket 事件。只接受 UTF-8 `Text`。文本上限 10 MiB，元数据上限 256 KiB；长文本文件名必须是安全的 `.txt` 名称。服务端计算 SHA-256 哈希，按 UTF-16 代码单元填写 `size`，由服务端填写 `syncedAt`。长文本先暂存再提交；提交成功后才广播。未提交上传最多 16 个，并在后续上传或服务启动时清理超过一小时的对象。历史对象目前无限保留；请监控磁盘容量。没有多账户、图片、普通文件、文件组、完整历史管理 API、通用 WebDAV 或 S3 功能。

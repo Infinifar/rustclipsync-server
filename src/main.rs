@@ -470,6 +470,14 @@ fn open_db(path: PathBuf) -> Result<Connection, Box<dyn std::error::Error>> {
     Ok(db)
 }
 
+fn clean_history(db: &Connection, days: u32) -> rusqlite::Result<usize> {
+    // Keep the current clipboard even if its history entry is older than the limit.
+    db.execute(
+        "DELETE FROM history WHERE unixepoch(json_extract(profile, '$.syncedAt')) < unixepoch() - ?1 AND hash NOT IN (SELECT json_extract(profile, '$.hash') FROM current WHERE id = 1)",
+        [i64::from(days) * 86_400],
+    )
+}
+
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if env::args().nth(1).as_deref() == Some("--healthcheck") {
@@ -499,6 +507,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if user.is_empty() || password.len() < 12 {
         return Err("user must be nonempty and password at least 12 characters".into());
     }
+    let retention_days: u32 = env::var("RCS_HISTORY_RETENTION_DAYS")
+        .unwrap_or_else(|_| "7".into())
+        .parse()
+        .map_err(|_| "RCS_HISTORY_RETENTION_DAYS must be an integer from 1 to 3650")?;
+    if !(1..=3650).contains(&retention_days) {
+        return Err("RCS_HISTORY_RETENTION_DAYS must be an integer from 1 to 3650".into());
+    }
     let listen: SocketAddr = env::var("RCS_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8090".into())
         .parse()?;
@@ -510,6 +525,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         password,
         events,
         tokens: Mutex::new(HashMap::new()),
+    });
+    let cleanup_app = Arc::clone(&app);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            let db = cleanup_app.db.lock().await;
+            if clean_history(&db, retention_days).is_err() {
+                eprintln!("history cleanup failed");
+            }
+        }
     });
     let listener = tokio::net::TcpListener::bind(listen).await?;
     axum::serve(listener, router(app)).await?;
@@ -526,6 +552,38 @@ mod tests {
     use futures_util::SinkExt;
     use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
     use tower::ServiceExt;
+
+    #[test]
+    fn cleanup_keeps_current_and_unknown_dates() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE current(id INTEGER PRIMARY KEY, profile TEXT NOT NULL); CREATE TABLE history(hash TEXT PRIMARY KEY, profile TEXT NOT NULL, data BLOB NOT NULL);").unwrap();
+        for (hash, date) in [
+            ("old", "2000-01-01T00:00:00Z"),
+            ("current", "2000-01-01T00:00:00Z"),
+            ("unknown", "invalid"),
+            ("recent", "2999-01-01T00:00:00Z"),
+        ] {
+            db.execute(
+                "INSERT INTO history VALUES (?1, ?2, X'')",
+                params![hash, json!({"hash":hash,"syncedAt":date}).to_string()],
+            )
+            .unwrap();
+        }
+        db.execute(
+            "INSERT INTO current VALUES (1, ?1)",
+            [json!({"hash":"current"}).to_string()],
+        )
+        .unwrap();
+        assert_eq!(clean_history(&db, 7).unwrap(), 1);
+        let hashes: Vec<String> = db
+            .prepare("SELECT hash FROM history ORDER BY hash")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(hashes, ["current", "recent", "unknown"]);
+    }
 
     fn test_state() -> Shared {
         let db = Connection::open_in_memory().unwrap();
