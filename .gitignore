@@ -3,4 +3,8 @@
 *.db
 *.db-shm
 *.db-wal
+*.db.*
 /password.secret
+/db.key
+*.sqlite
+*.sqlite3

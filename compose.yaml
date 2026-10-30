@@ -7,9 +7,11 @@ services:
     environment:
       RCS_USER: ${RCS_USER:?set RCS_USER}
       RCS_PASSWORD_FILE: /run/secrets/rcs_password
+      RCS_DB_KEY_FILE: /run/secrets/rcs_db_key
       RCS_HISTORY_RETENTION_DAYS: ${RCS_HISTORY_RETENTION_DAYS:-7}
     secrets:
       - rcs_password
+      - rcs_db_key
     volumes:
       - clipsync_data:/data
     security_opt:
@@ -19,6 +21,8 @@ services:
 secrets:
   rcs_password:
     file: ./password.secret
+  rcs_db_key:
+    file: ${RCS_DB_KEY_PATH:-./db.key}
 volumes:
   clipsync_data:
     name: rustclipsync_data

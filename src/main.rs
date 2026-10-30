@@ -31,6 +31,8 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
+mod database;
+
 const MAX_TEXT: usize = 10 * 1024 * 1024;
 const MAX_META: usize = 256 * 1024;
 const MAX_WS: usize = 16 * 1024;
@@ -457,19 +459,6 @@ fn router(app: Shared) -> Router {
         .with_state(app)
 }
 
-fn open_db(path: PathBuf) -> Result<Connection, Box<dyn std::error::Error>> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let db = Connection::open(path)?;
-    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
-        CREATE TABLE IF NOT EXISTS current(id INTEGER PRIMARY KEY CHECK(id=1), profile TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS history(hash TEXT PRIMARY KEY, profile TEXT NOT NULL, data BLOB NOT NULL);
-        CREATE TABLE IF NOT EXISTS pending(name TEXT PRIMARY KEY, hash TEXT NOT NULL, data BLOB NOT NULL, created INTEGER NOT NULL);
-        DELETE FROM pending WHERE created < unixepoch()-3600;")?;
-    Ok(db)
-}
-
 fn clean_history(db: &Connection, days: u32) -> rusqlite::Result<usize> {
     // Keep the current clipboard even if its history entry is older than the limit.
     db.execute(
@@ -496,6 +485,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
+    let path = PathBuf::from(env::var("RCS_DATA_DIR").unwrap_or_else(|_| "./data".into()))
+        .join("clipsync.db");
+    let db_key = database::read_key()?;
+    if env::args().nth(1).as_deref() == Some("--migrate-db") {
+        database::migrate(&path, &db_key)?;
+        return Ok(());
+    }
     let user = env::var("RCS_USER").map_err(|_| "RCS_USER is required")?;
     let password = if let Ok(path) = env::var("RCS_PASSWORD_FILE") {
         std::fs::read_to_string(path)?
@@ -517,10 +513,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen: SocketAddr = env::var("RCS_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8090".into())
         .parse()?;
-    let path = env::var("RCS_DATA_DIR").unwrap_or_else(|_| "./data".into());
     let (events, _) = broadcast::channel(64);
     let app = Arc::new(App {
-        db: Mutex::new(open_db(PathBuf::from(path).join("clipsync.db"))?),
+        db: Mutex::new(database::open(&path, &db_key)?),
         user,
         password,
         events,
@@ -831,7 +826,8 @@ mod tests {
     async fn committed_text_survives_reopen_and_failed_commit_does_not_replace_it() {
         let directory = std::env::temp_dir().join(format!("rustclipsync-test-{}", Uuid::new_v4()));
         let path = directory.join("clipsync.db");
-        let db = open_db(path.clone()).unwrap();
+        let key = "ab".repeat(32);
+        let db = database::open(&path, &key).unwrap();
         let (events, _) = broadcast::channel(16);
         let app = router(Arc::new(App {
             db: Mutex::new(db),
@@ -869,7 +865,7 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         drop(app);
-        let reopened = open_db(path).unwrap();
+        let reopened = database::open(&path, &key).unwrap();
         let profile: String = reopened
             .query_row("SELECT profile FROM current WHERE id=1", [], |r| r.get(0))
             .unwrap();

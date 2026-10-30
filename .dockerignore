@@ -2,5 +2,8 @@ target
 .git
 .env
 password.secret
+db.key
+*.sqlite
+*.sqlite3
 data
 *.db*
