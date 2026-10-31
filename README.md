@@ -36,6 +36,8 @@ RCS_USER=your-user RCS_PASSWORD=replace-with-a-long-random-password RCS_DB_KEY=y
 
 服务端默认在 60 秒内过滤与当前剪贴板相同的重复提交：返回成功但不更新历史或广播。窗口从上次实际写入开始计算，重复提交不延长窗口；切换到其他内容后再切回会立即同步。在 `.env` 中设置 `RCS_DEDUP_WINDOW_SECONDS` 可调整为 0 至 86400 秒，0 表示关闭；修改后需重新创建容器。
 
+文本提交可以省略 `hash` 或传入 `null`，服务端会自行计算；如果提供了非空哈希，仍须与文本匹配。此行为兼容使用该格式的“说点啥”输入法文本上传，但其他客户端功能仍需分别测试。
+
 ## 协议和限制
 
 实现 `GET /`、`GET`/`PUT /SyncClipboard.json`、`PUT`/`GET`/`HEAD /file/{name}`、`GET /api/history/Text-{hash}` 与 `/data`、SignalR v1 的协商和 JSON WebSocket 事件。只接受 UTF-8 `Text`。文本上限 10 MiB，元数据上限 256 KiB；长文本文件名必须是安全的 `.txt` 名称。服务端计算 SHA-256 哈希，按 UTF-16 代码单元填写 `size`，由服务端填写 `syncedAt`。长文本先暂存再提交；提交成功后才广播。未提交上传最多 16 个，并在后续上传或服务启动时清理超过一小时的对象。没有多账户、图片、普通文件、文件组、完整历史管理 API、通用 WebDAV 或 S3 功能。

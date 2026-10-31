@@ -43,6 +43,7 @@ const RS: char = '\u{1e}';
 struct Profile {
     #[serde(rename = "type")]
     kind: String,
+    #[serde(default, deserialize_with = "deserialize_optional_hash")]
     hash: String,
     text: String,
     has_data: bool,
@@ -81,6 +82,12 @@ struct App {
 }
 type Shared = Arc<App>;
 type ApiResult = Result<Response, StatusCode>;
+
+fn deserialize_optional_hash<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
 
 fn digest(data: &[u8]) -> String {
     format!("{:X}", Sha256::digest(data))
@@ -643,6 +650,43 @@ mod tests {
             .oneshot(request.body(Body::from(body)).unwrap())
             .await
             .unwrap()
+    }
+    #[tokio::test]
+    async fn accepts_phone_text_without_hash_and_validates_supplied_hash() {
+        let app = test_app();
+        for payload in [
+            json!({"hasData":false,"text":"手机测试🙂","type":"Text"}),
+            json!({"hasData":false,"text":"手机测试🙂","type":"Text","hash":null}),
+        ] {
+            let response = call(
+                &app,
+                Method::PUT,
+                "/SyncClipboard.json",
+                payload.to_string().into_bytes(),
+                true,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let response = call(&app, Method::GET, "/SyncClipboard.json", vec![], true).await;
+        let profile: Profile =
+            serde_json::from_slice(&to_bytes(response.into_body(), MAX_META).await.unwrap())
+                .unwrap();
+        assert_eq!(profile.hash, digest("手机测试🙂".as_bytes()));
+        let invalid =
+            json!({"hasData":false,"text":"手机测试🙂","type":"Text","hash":"0".repeat(64)});
+        assert_eq!(
+            call(
+                &app,
+                Method::PUT,
+                "/SyncClipboard.json",
+                invalid.to_string().into_bytes(),
+                true
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
     }
     #[tokio::test]
     async fn duplicate_current_is_suppressed_but_changes_and_expired_repeat_are_broadcast() {
