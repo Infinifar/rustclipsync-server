@@ -64,6 +64,7 @@ pub fn open(path: &Path, key: &str) -> Result<Connection> {
         CREATE TABLE IF NOT EXISTS history(hash TEXT PRIMARY KEY, profile TEXT NOT NULL, data BLOB NOT NULL);
         CREATE TABLE IF NOT EXISTS pending(name TEXT PRIMARY KEY, hash TEXT NOT NULL, data BLOB NOT NULL, created INTEGER NOT NULL);
         DELETE FROM pending WHERE created < unixepoch()-3600;")?;
+    crate::v1::init(&db)?;
     Ok(db)
 }
 

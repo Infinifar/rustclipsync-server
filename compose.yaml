@@ -9,7 +9,6 @@ services:
       RCS_PASSWORD_FILE: /run/secrets/rcs_password
       RCS_DB_KEY: ${RCS_DB_KEY:?set RCS_DB_KEY to 64 hexadecimal characters}
       RCS_HISTORY_RETENTION_DAYS: ${RCS_HISTORY_RETENTION_DAYS:-7}
-      RCS_DEDUP_WINDOW_SECONDS: ${RCS_DEDUP_WINDOW_SECONDS:-60}
     secrets:
       - rcs_password
     volumes:
