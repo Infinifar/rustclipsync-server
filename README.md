@@ -27,12 +27,12 @@ RustClipSync 是面向个人设备的轻量 Rust 文本剪贴板同步服务，�
 
 ## Docker Compose 部署
 
-需要 Docker Compose、可用的 HTTPS 反向代理或 Cloudflare Tunnel。下面的 `docker-compose.yml` 固定到已发布的镜像，便于控制升级。容器仅在宿主机 `127.0.0.1:8090` 开放端口：
+需要 Docker Compose、可用的 HTTPS 反向代理或 Cloudflare Tunnel。下面的 `docker-compose.yml` 使用 `latest` 镜像；升级时先备份数据，再执行 `docker compose pull` 和 `docker compose up -d`。如需固定版本，可将标签改为 `v1.1.0`。容器仅在宿主机 `127.0.0.1:8090` 开放端口：
 
 ```yaml
 services:
   rustclipsync:
-    image: ghcr.io/infinifar/rustclipsync-server:v1.0.0
+    image: ghcr.io/infinifar/rustclipsync-server:latest
     restart: unless-stopped
     ports:
       - "127.0.0.1:8090:8090"
