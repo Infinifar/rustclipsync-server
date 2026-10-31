@@ -6,6 +6,7 @@ RustClipSync 是面向个人设备的轻量 Rust 文本剪贴板同步服务，�
 
 - Android：[Fcitx5 Android 输入法 fork](https://github.com/Infinifar/fcitx5-android-bibi-keyboard)，内置 RustClipSync 同步模块，保留说点啥语音输入支持。
 - Omarchy：[Omaclipsync 插件](https://github.com/Infinifar/omaclipsync)。
+- Windows：[RustClipSync Desktop](https://github.com/Infinifar/rustclipsync-desktop)，Windows 11 原生客户端，支持后台同步、托盘、历史记录和敏感收件区。可从 [Release 页面](https://github.com/Infinifar/rustclipsync-desktop/releases)下载安装包；安装包目前未签名。
 - 其他客户端：[接口协议与适配说明](PROTOCOL-V1.md)。初次登记从当前版本开始，不回放旧剪贴板；断线期间只追上最新状态，本地待发送内容与远端冲突时需用户确认。剪贴板写入与本地游标不能原子提交，异常崩溃时不保证严格恰好一次。
 
 只同步 UTF-8 文本，单条上限 10 MiB，不支持图片、文件或多账户。敏感文本默认不传输；只有来源应用明确标记的敏感内容才能被识别。
