@@ -727,7 +727,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_exposes_only_health_and_v1_routes() {
+    async fn service_exposes_public_site_and_v1_routes() {
         let (_, app) = app();
         let basic = format!("Basic {}", STANDARD.encode("test:long-password"));
         assert_eq!(
@@ -736,6 +736,15 @@ mod tests {
                 .status(),
             StatusCode::OK
         );
+        for (path, content_type) in [
+            ("/", "text/html; charset=utf-8"),
+            ("/favicon.svg", "image/svg+xml"),
+            ("/favicon.ico", "image/x-icon"),
+        ] {
+            let response = request(&app, Method::GET, path, "", Body::empty()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], content_type);
+        }
         assert_eq!(
             request(
                 &app,

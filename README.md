@@ -30,7 +30,7 @@ RustClipSync 是面向个人设备的轻量 Rust 文本剪贴板同步服务，�
 ```yaml
 services:
   rustclipsync:
-    image: ghcr.io/infinifar/rustclipsync-server:sha-c57194e
+    image: ghcr.io/infinifar/rustclipsync-server:v1.0.0
     restart: unless-stopped
     ports:
       - "127.0.0.1:8090:8090"
@@ -73,7 +73,7 @@ curl http://127.0.0.1:8090/healthz
 
 `.env` 中的 `RCS_DB_KEY` 是 32 字节密钥的 64 位十六进制表示，必须妥善备份；丢失后无法恢复数据库。Docker 管理员可读取容器环境变量。单独更改密钥不会重新加密数据库。账号密码用于登记和管理设备，同步使用独立设备令牌。不要将 `.env`、密码文件或备份提交到仓库。
 
-将 HTTPS 代理指向 `http://127.0.0.1:8090`，转发 `/healthz` 和 `/v1/`；长轮询最长 25 秒，代理超时应更长。客户端填写 HTTPS 根地址、账户和密码进行配对。HTTPS 保护传输，但服务端运行时可读取正文；当前不提供端到端加密。
+将 HTTPS 代理指向 `http://127.0.0.1:8090`，转发 `/`、`/favicon.svg`、`/favicon.ico`、`/healthz` 和 `/v1/`；长轮询最长 25 秒，代理超时应更长。客户端填写 HTTPS 根地址、账户和密码进行配对。HTTPS 保护传输，但服务端运行时可读取正文；当前不提供端到端加密。
 
 历史默认保留 7 天；可在 `.env` 中设置 `RCS_HISTORY_RETENTION_DAYS` 为 1–3650 天，并重新创建容器。当前文本始终保留，消息 ID 和取消回执至少保留 30 天；清理不等于安全擦除。
 

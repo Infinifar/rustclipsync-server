@@ -12,6 +12,7 @@ use std::{
 use axum::{
     Router,
     http::{HeaderMap, StatusCode, header},
+    response::Html,
     routing::get,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -64,8 +65,31 @@ async fn health() -> &'static str {
     "ok"
 }
 
+async fn index() -> Html<&'static str> {
+    Html(
+        r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>RustClipSync Server</title><link rel="icon" type="image/svg+xml" href="/favicon.svg"></head><body><main><h1>RustClipSync Server</h1><p>剪贴板同步服务正在运行。</p><p><a href="https://github.com/Infinifar/rustclipsync-server">查看项目与部署说明</a></p></main></body></html>"#,
+    )
+}
+
+async fn favicon_svg() -> ([(header::HeaderName, &'static str); 1], &'static str) {
+    (
+        [(header::CONTENT_TYPE, "image/svg+xml")],
+        include_str!("../assets/favicon.svg"),
+    )
+}
+
+async fn favicon_ico() -> ([(header::HeaderName, &'static str); 1], &'static [u8]) {
+    (
+        [(header::CONTENT_TYPE, "image/x-icon")],
+        include_bytes!("../assets/favicon.ico"),
+    )
+}
+
 fn router(app: Shared) -> Router {
     Router::new()
+        .route("/", get(index))
+        .route("/favicon.svg", get(favicon_svg))
+        .route("/favicon.ico", get(favicon_ico))
         .route("/healthz", get(health))
         .merge(v1::router())
         .with_state(app)
