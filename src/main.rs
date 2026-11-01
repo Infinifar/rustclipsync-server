@@ -52,7 +52,7 @@ async fn health() -> &'static str {
 
 async fn index() -> Html<&'static str> {
     Html(
-        r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>RustClipSync Server</title><link rel="icon" type="image/svg+xml" href="/favicon.svg"></head><body><main><h1>RustClipSync Server</h1><p>剪贴板同步服务正在运行。</p><p><a href="https://github.com/Infinifar/rustclipsync-server">查看项目与部署说明</a></p></main></body></html>"#,
+        r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>RustClipSync Server</title><link rel="icon" type="image/svg+xml" href="/favicon.svg?icon=omaclipsync"><link rel="icon" type="image/x-icon" sizes="16x16 32x32 48x48" href="/favicon.ico?icon=omaclipsync"></head><body><main><h1>RustClipSync Server</h1><p>剪贴板同步服务正在运行。</p><p><a href="https://github.com/Infinifar/rustclipsync-server">查看项目与部署说明</a></p></main></body></html>"#,
     )
 }
 
