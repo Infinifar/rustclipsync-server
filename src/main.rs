@@ -15,13 +15,14 @@ use axum::{
     response::Html,
     routing::get,
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
 use rusqlite::Connection;
-use subtle::ConstantTimeEq;
 use tokio::sync::{Mutex, Semaphore, broadcast};
 
+mod admin;
 mod api;
+mod auth;
 mod database;
+mod presence;
 
 const MAX_TEXT: usize = 10 * 1024 * 1024;
 
@@ -32,30 +33,14 @@ struct App {
     events: broadcast::Sender<()>,
     waiters: Arc<Semaphore>,
     uploads: Arc<Semaphore>,
+    auth: auth::AuthState,
+    web: admin::WebState,
+    presence: presence::Presence,
 }
 type Shared = Arc<App>;
 
-fn require(headers: &HeaderMap, app: &App) -> Result<(), StatusCode> {
-    let value = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| {
-            v.strip_prefix("Basic ")
-                .or_else(|| v.strip_prefix("basic "))
-        })
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    let decoded = STANDARD
-        .decode(value)
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let clear = std::str::from_utf8(&decoded).map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let (user, password) = clear.split_once(':').ok_or(StatusCode::UNAUTHORIZED)?;
-    let good = user.as_bytes().ct_eq(app.user.as_bytes())
-        & password.as_bytes().ct_eq(app.password.as_bytes());
-    if bool::from(good) {
-        Ok(())
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
-    }
+fn require(headers: &HeaderMap, app: &Shared) -> Result<(), StatusCode> {
+    auth::require_admin(headers, app)
 }
 
 fn db_error(_: rusqlite::Error) -> StatusCode {
@@ -92,6 +77,7 @@ fn router(app: Shared) -> Router {
         .route("/favicon.ico", get(favicon_ico))
         .route("/healthz", get(health))
         .merge(api::router())
+        .merge(admin::router())
         .with_state(app)
 }
 
@@ -165,13 +151,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "127.0.0.1:8090".into())
         .parse()?;
     let (events, _) = broadcast::channel(64);
+    let auth = auth::AuthState::from_env(&user)?;
+    let web = admin::WebState::from_env(&auth)?;
+    let db = database::open(&path, &db_key)?;
+    auth.check_names(&db, &user)?;
     let app = Arc::new(App {
-        db: Mutex::new(database::open(&path, &db_key)?),
+        db: Mutex::new(db),
         user,
         password,
         events,
         waiters: Arc::new(Semaphore::new(128)),
         uploads: Arc::new(Semaphore::new(8)),
+        auth,
+        web,
+        presence: presence::Presence::default(),
     });
     let cleanup_app = Arc::clone(&app);
     tokio::spawn(async move {

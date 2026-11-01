@@ -38,6 +38,8 @@ pub fn init(db: &Connection) -> rusqlite::Result<()> {
             sensitive INTEGER NOT NULL DEFAULT 0 CHECK(sensitive IN (0,1)));
          CREATE TABLE IF NOT EXISTS v1_cancelled(
             message_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, created INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS rcs_accounts(
+            id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL);
          CREATE INDEX IF NOT EXISTS v1_messages_created ON v1_messages(created);",
     )?;
     let has_sensitive: bool = db.query_row(
@@ -47,6 +49,23 @@ pub fn init(db: &Connection) -> rusqlite::Result<()> {
     )?;
     if !has_sensitive {
         db.execute("ALTER TABLE v1_messages ADD COLUMN sensitive INTEGER NOT NULL DEFAULT 0 CHECK(sensitive IN (0,1))", [])?;
+    }
+    for (column, definition) in [
+        ("account_id", "TEXT"),
+        ("label", "TEXT NOT NULL DEFAULT ''"),
+        ("last_seen", "INTEGER"),
+    ] {
+        let exists: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('v1_devices') WHERE name=?1)",
+            [column],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            db.execute(
+                &format!("ALTER TABLE v1_devices ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
     }
     db.execute(
         "INSERT OR IGNORE INTO v1_meta(singleton, epoch, revision) VALUES(1, ?1, 0)",
@@ -161,7 +180,9 @@ impl FromRequestParts<Shared> for Device {
             id: id.to_owned(),
             token_hash: hash(token.as_bytes()),
         };
-        check_device(&*app.db.lock().await, &device)?;
+        let db = app.db.lock().await;
+        check_device(&db, &device)?;
+        app.presence.record(&db, &device.id)?;
         Ok(device)
     }
 }
@@ -229,12 +250,13 @@ async fn register(
     headers: HeaderMap,
     Json(input): Json<Registration>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    require(&headers, &app)?;
+    let account = crate::auth::registration(&headers, &app).await?;
     if !canonical_uuid(&input.device_id) || !token_valid(&input.device_token) {
         return Err(StatusCode::BAD_REQUEST);
     }
     let mut db = app.db.lock().await;
     let tx = db.transaction().map_err(db_error)?;
+    account.recheck(&tx)?;
     let (epoch, current_revision): (String, i64) = tx
         .query_row(
             "SELECT epoch, revision FROM v1_meta WHERE singleton=1",
@@ -242,17 +264,17 @@ async fn register(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(db_error)?;
-    let existing: Option<(Vec<u8>, i64)> = tx
+    let existing: Option<(Vec<u8>, i64, Option<String>)> = tx
         .query_row(
-            "SELECT token_hash, ack_revision FROM v1_devices WHERE id=?1",
+            "SELECT token_hash, ack_revision, account_id FROM v1_devices WHERE id=?1",
             [&input.device_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()
         .map_err(db_error)?;
     let token_hash = hash(input.device_token.as_bytes());
-    let ack_revision = if let Some((saved, ack_revision)) = existing {
-        if !bool::from(saved.as_slice().ct_eq(&token_hash)) {
+    let ack_revision = if let Some((saved, ack_revision, owner)) = existing {
+        if owner != account.id || !bool::from(saved.as_slice().ct_eq(&token_hash)) {
             return Err(StatusCode::CONFLICT);
         }
         ack_revision
@@ -264,8 +286,8 @@ async fn register(
             return Err(StatusCode::TOO_MANY_REQUESTS);
         }
         tx.execute(
-            "INSERT INTO v1_devices(id, token_hash, ack_revision) VALUES(?1, ?2, ?3)",
-            params![input.device_id, token_hash, current_revision],
+            "INSERT INTO v1_devices(id, token_hash, ack_revision, account_id) VALUES(?1, ?2, ?3, ?4)",
+            params![input.device_id, token_hash, current_revision, account.id],
         )
         .map_err(db_error)?;
         current_revision
@@ -682,6 +704,9 @@ mod tests {
             events,
             waiters: Arc::new(Semaphore::new(8)),
             uploads: Arc::new(Semaphore::new(2)),
+            auth: crate::auth::AuthState::default(),
+            web: crate::admin::WebState::default(),
+            presence: crate::presence::Presence::default(),
         });
         (Arc::clone(&app), crate::router(app))
     }
@@ -1287,6 +1312,9 @@ mod tests {
                 events,
                 waiters: Arc::new(Semaphore::new(8)),
                 uploads: Arc::new(Semaphore::new(2)),
+                auth: crate::auth::AuthState::default(),
+                web: crate::admin::WebState::default(),
+                presence: crate::presence::Presence::default(),
             });
             let app = crate::router(state);
             let (_, auth, reg) = register_device(&app).await;

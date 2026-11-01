@@ -2,6 +2,7 @@ target
 .git
 .env
 password.secret
+admin-password.secret
 db.key
 *.sqlite
 *.sqlite3

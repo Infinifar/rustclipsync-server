@@ -5,6 +5,7 @@
 *.db-wal
 *.db.*
 /password.secret
+/admin-password.secret
 /db.key
 *.sqlite
 *.sqlite3

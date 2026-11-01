@@ -83,6 +83,12 @@ Point the HTTPS proxy to `http://127.0.0.1:8090` and forward `/`, `/favicon.svg`
 
 History is retained for seven days by default. Set `RCS_HISTORY_RETENTION_DAYS` in `.env` to 1–3650 and recreate the container to change it. Current text is always retained; message IDs and cancellation receipts are kept for at least 30 days. Cleanup is not secure erasure.
 
+## Device administration
+
+An optional, responsive [administration page](ADMINISTRATION.md) at `/admin/` lists devices, recent activity and last activity times, lets you label devices, create sync-only device accounts shared by several devices, and revoke either one device or an entire account. All accounts share one clipboard. Online status means an authenticated request within 60 seconds, not guaranteed reachability.
+
+The unique administrator has separate `RCS_ADMIN_USER` and password credentials; the administrator can also pair sync clients. Existing `RCS_USER` credentials and issued device tokens remain valid for synchronization. With an independent administrator configured, the old sync account no longer grants device-management access. Device accounts cannot administer the server. The web page is disabled by default; follow the [setup and security guide](ADMINISTRATION.md) to use `docker-compose.admin.yml`, configure an HTTPS origin and provide `admin-password.secret`. It uses short-lived HttpOnly sessions, CSRF protection, bounded password authentication and Argon2id account password hashes. Schema additions preserve existing paired devices.
+
 ## Upgrades, backup and recovery
 
 Before upgrading from the old protocol, stop the service and back up the complete data volume, key, password and old image. Old protocol data is not automatically sent as new protocol messages. Replace old clients with RustClipSync clients.
