@@ -2,9 +2,12 @@ name: Rust
 on:
   push:
   pull_request:
+permissions:
+  contents: read
 jobs:
   check:
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -13,3 +16,14 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+      - name: Build server for HTTPS interoperability
+        run: cargo build --locked
+      - name: Check out the verified shared core
+        uses: actions/checkout@v5
+        with:
+          repository: Infinifar/rustclipsync-core
+          ref: a13298c550fa4ebb287e55fe7a229486a36f22f5
+          path: .ci/rustclipsync-core
+          persist-credentials: false
+      - name: Verify server and shared core over HTTPS
+        run: python3 .ci/rustclipsync-core/tests/server_e2e.py "$GITHUB_WORKSPACE/target/debug/rustclipsync-server"

@@ -940,6 +940,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skipped_ack_is_idempotent_monotonic_and_does_not_block_new_messages() {
+        let (_, app) = app();
+        let (_, a, reg) = register_device(&app).await;
+        let (_, b, _) = register_device(&app).await;
+        let epoch = reg["epoch"].as_str().unwrap();
+        let first = Uuid::new_v4().to_string();
+        assert_eq!(
+            put_message(&app, &a, epoch, 0, &first, "first")
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let skipped =
+            json!({"epoch":epoch,"revision":1,"messageId":first,"result":"skipped"}).to_string();
+        for _ in 0..2 {
+            let response = request(&app, Method::POST, "/v1/ack", &b, skipped.clone()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(json_body(response).await["ackRevision"], 1);
+        }
+        let source =
+            json_body(request(&app, Method::GET, "/v1/state", &a, Body::empty()).await).await;
+        assert_eq!(
+            source["ackRevision"], 0,
+            "another device's ACK must be independent"
+        );
+        assert_eq!(source["revision"], 1);
+        let body = request(
+            &app,
+            Method::GET,
+            &format!("/v1/messages/{first}/content"),
+            &b,
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(body.status(), StatusCode::OK);
+        assert_eq!(to_bytes(body.into_body(), 32).await.unwrap(), "first");
+
+        let second = Uuid::new_v4().to_string();
+        assert_eq!(
+            put_message(&app, &a, epoch, 1, &second, "second")
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let response = request(
+            &app,
+            Method::GET,
+            &format!("/v1/changes?epoch={epoch}&after=1"),
+            &b,
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let next = json_body(response).await;
+        assert_eq!(next["revision"], 2);
+        assert_eq!(next["messageId"], second);
+        assert_eq!(next["ackRevision"], 1);
+
+        let applied =
+            json!({"epoch":epoch,"revision":2,"messageId":second,"result":"applied"}).to_string();
+        let response = request(&app, Method::POST, "/v1/ack", &b, applied).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["ackRevision"], 2);
+        let stale = request(&app, Method::POST, "/v1/ack", &b, skipped).await;
+        assert_eq!(stale.status(), StatusCode::OK);
+        assert_eq!(json_body(stale).await["ackRevision"], 2);
+        let final_state =
+            json_body(request(&app, Method::GET, "/v1/state", &b, Body::empty()).await).await;
+        assert_eq!(final_state["ackRevision"], 2);
+        assert_eq!(final_state["revision"], 2);
+        assert_eq!(final_state["messageId"], second);
+    }
+
+    #[tokio::test]
+    async fn revocation_wakes_an_in_flight_long_poll_and_releases_its_permit() {
+        let (shared, app) = app();
+        let (id, auth, reg) = register_device(&app).await;
+        let epoch = reg["epoch"].as_str().unwrap();
+        let url = format!("/v1/changes?epoch={epoch}&after=0");
+        let capacity = shared.v1_waiters.available_permits();
+        let mut poll = std::pin::pin!(request(&app, Method::GET, &url, &auth, Body::empty()));
+        // Poll to the actual waiting point; no sleep or scheduling guess is needed.
+        assert!(futures_util::poll!(poll.as_mut()).is_pending());
+        assert_eq!(shared.v1_waiters.available_permits(), capacity - 1);
+
+        let basic = format!("Basic {}", STANDARD.encode("test:long-password"));
+        let removed = request(
+            &app,
+            Method::DELETE,
+            &format!("/v1/devices/{id}"),
+            &basic,
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+        let std::task::Poll::Ready(response) = futures_util::poll!(poll.as_mut()) else {
+            panic!("device revocation must wake the waiting request without the 25-second timeout");
+        };
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(shared.v1_waiters.available_permits(), capacity);
+    }
+
+    #[tokio::test]
     async fn long_poll_wakes_after_commit_and_revocation_blocks_requests() {
         let (_, app) = app();
         let (_, a, reg) = register_device(&app).await;
