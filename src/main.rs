@@ -1,5 +1,5 @@
-//! RustClipSync's latest-value V1 server. Legacy SyncClipboard endpoints are
-//! deliberately not exposed; see PROTOCOL-V1.md for the wire contract.
+//! RustClipSync's latest-value server. Legacy SyncClipboard endpoints are
+//! deliberately not exposed; see PROTOCOL.md for the wire contract.
 use std::{
     env,
     io::{Read, Write},
@@ -20,8 +20,8 @@ use rusqlite::Connection;
 use subtle::ConstantTimeEq;
 use tokio::sync::{Mutex, Semaphore, broadcast};
 
+mod api;
 mod database;
-mod v1;
 
 const MAX_TEXT: usize = 10 * 1024 * 1024;
 
@@ -29,9 +29,9 @@ struct App {
     db: Mutex<Connection>,
     user: String,
     password: String,
-    v1_events: broadcast::Sender<()>,
-    v1_waiters: Arc<Semaphore>,
-    v1_uploads: Arc<Semaphore>,
+    events: broadcast::Sender<()>,
+    waiters: Arc<Semaphore>,
+    uploads: Arc<Semaphore>,
 }
 type Shared = Arc<App>;
 
@@ -91,11 +91,11 @@ fn router(app: Shared) -> Router {
         .route("/favicon.svg", get(favicon_svg))
         .route("/favicon.ico", get(favicon_ico))
         .route("/healthz", get(health))
-        .merge(v1::router())
+        .merge(api::router())
         .with_state(app)
 }
 
-/// Old records are not exposed through V1, but still obey the configured
+/// Old records are not exposed through the current API, but still obey the configured
 /// retention until the operator deliberately removes them.
 fn clean_legacy_history(db: &Connection, days: u32) -> rusqlite::Result<usize> {
     db.execute(
@@ -131,9 +131,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         database::migrate(&path, &db_key)?;
         return Ok(());
     }
-    if command.as_deref() == Some("--rotate-v1-epoch") {
+    if command.as_deref() == Some("--rotate-epoch") {
         let mut db = database::open(&path, &db_key)?;
-        v1::rotate_epoch(&mut db)?;
+        api::rotate_epoch(&mut db)?;
         return Ok(());
     }
     if command.is_some() {
@@ -164,14 +164,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen: SocketAddr = env::var("RCS_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8090".into())
         .parse()?;
-    let (v1_events, _) = broadcast::channel(64);
+    let (events, _) = broadcast::channel(64);
     let app = Arc::new(App {
         db: Mutex::new(database::open(&path, &db_key)?),
         user,
         password,
-        v1_events,
-        v1_waiters: Arc::new(Semaphore::new(128)),
-        v1_uploads: Arc::new(Semaphore::new(8)),
+        events,
+        waiters: Arc::new(Semaphore::new(128)),
+        uploads: Arc::new(Semaphore::new(8)),
     });
     let cleanup_app = Arc::clone(&app);
     tokio::spawn(async move {
@@ -182,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if clean_legacy_history(&db, retention_days).is_err() {
                 eprintln!("old history cleanup failed");
             }
-            if v1::clean_history(&db, retention_days).is_err() {
+            if api::clean_history(&db, retention_days).is_err() {
                 eprintln!("history cleanup failed");
             }
         }

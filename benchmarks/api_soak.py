@@ -52,7 +52,7 @@ def main():
             while not stop.is_set():
                 start = time.perf_counter()
                 try:
-                    request("GET", "/v1/state", bearer)
+                    request("GET", "/api/state", bearer)
                     reads.append((time.perf_counter() - start) * 1000)
                 except Exception as error:
                     errors.append(type(error).__name__)
@@ -81,7 +81,7 @@ def main():
                         raise
                     time.sleep(0.1)
             payload = json.dumps({"deviceId": device, "deviceToken": token}).encode()
-            epoch = json.loads(request("POST", "/v1/devices", basic, payload,
+            epoch = json.loads(request("POST", "/api/devices", basic, payload,
                                        {"Content-Type": "application/json"}))["epoch"]
             threads = [threading.Thread(target=reader, daemon=True) for _ in range(8)]
             threads.append(threading.Thread(target=sample, daemon=True))
@@ -92,7 +92,7 @@ def main():
             while time.monotonic() - start < duration:
                 tick = time.perf_counter()
                 try:
-                    response = request("PUT", f"/v1/messages/{uuid.uuid4()}", bearer, b"s" * 1024,
+                    response = request("PUT", f"/api/messages/{uuid.uuid4()}", bearer, b"s" * 1024,
                                        {"X-RCS-Epoch": epoch, "X-RCS-Base-Revision": str(revision), "X-RCS-Sensitive": "0"})
                     revision += 1
                     if json.loads(response)["revision"] != revision:

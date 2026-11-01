@@ -1,5 +1,7 @@
 # RustClipSync Server
 
+当前接口统一为 `/api/...`。服务端、各客户端及按路径过滤的反向代理需要配套更新；设备令牌、游标和加密数据保持不变。
+
 [English](README.md) · 简体中文
 
 RustClipSync 是面向个人设备的轻量 Rust 文本剪贴板同步服务，目标是较低的内存占用。它采用自有 RustClipSync 协议：离线期间只追上最新内容，通过消息 UUID、服务端版本和设备游标处理重试与重复通知。
@@ -10,7 +12,7 @@ RustClipSync 是面向个人设备的轻量 Rust 文本剪贴板同步服务，�
 - Omarchy：[Omaclipsync 插件](https://github.com/Infinifar/omaclipsync)。
 - Windows 与 Linux：[RustClipSync Desktop](https://github.com/Infinifar/rustclipsync-desktop)，Windows 11 使用 WinUI 3，Linux 使用独立的 Qt 6/QML 界面，支持后台同步、加密历史和敏感收件区。Linux 提供面向 Debian 12、Ubuntu 24.04、Fedora 43 和 Arch/Omarchy 的 x86_64 安装包，无需 Omarchy 或 Quickshell。可从 [Release 页面](https://github.com/Infinifar/rustclipsync-desktop/releases)下载；Windows 安装包目前未签名。安装及桌面要求见 [Linux 使用说明](https://github.com/Infinifar/rustclipsync-desktop/blob/main/LINUX.md)：支持 X11，Wayland 需要 data-control 支持，缺少该协议的 GNOME/Wayland 会话暂不支持。
 - 共享客户端核心：[rustclipsync-core](https://github.com/Infinifar/rustclipsync-core)，提供 Rust 客户端的同步状态机和 HTTPS 协议实现；Windows/Linux 桌面客户端与 Omaclipsync 插件分别提供平台适配。
-- 其他客户端：[接口协议与适配说明](PROTOCOL-V1.md)。初次登记从当前版本开始，不回放旧剪贴板；断线期间只追上最新状态，本地待发送内容与远端冲突时需用户确认。剪贴板写入与本地游标不能原子提交，异常崩溃时不保证严格恰好一次。
+- 其他客户端：[接口协议与适配说明](PROTOCOL.md)。初次登记从当前版本开始，不回放旧剪贴板；断线期间只追上最新状态，本地待发送内容与远端冲突时需用户确认。剪贴板写入与本地游标不能原子提交，异常崩溃时不保证严格恰好一次。
 
 只同步 UTF-8 文本，单条上限 10 MiB，不支持图片、文件或多账户。敏感文本默认不传输；只有来源应用明确标记的敏感内容才能被识别。
 
@@ -29,7 +31,7 @@ RustClipSync 是面向个人设备的轻量 Rust 文本剪贴板同步服务，�
 
 ## Docker Compose 部署
 
-需要 Docker Compose、可用的 HTTPS 反向代理或 Cloudflare Tunnel。下面的 `docker-compose.yml` 使用 `latest` 镜像；升级时先备份数据，再执行 `docker compose pull` 和 `docker compose up -d`。如需固定版本，可将标签改为 `v1.1.0`。容器仅在宿主机 `127.0.0.1:8090` 开放端口：
+需要 Docker Compose、可用的 HTTPS 反向代理或 Cloudflare Tunnel。下面的 `docker-compose.yml` 使用 `latest` 镜像；升级时先备份数据，再执行 `docker compose pull` 和 `docker compose up -d`。如需固定版本，可将标签改为 `v2.0.0`。容器仅在宿主机 `127.0.0.1:8090` 开放端口：
 
 ```yaml
 services:
@@ -77,7 +79,7 @@ curl http://127.0.0.1:8090/healthz
 
 `.env` 中的 `RCS_DB_KEY` 是 32 字节密钥的 64 位十六进制表示，必须妥善备份；丢失后无法恢复数据库。Docker 管理员可读取容器环境变量。单独更改密钥不会重新加密数据库。账号密码用于登记和管理设备，同步使用独立设备令牌。不要将 `.env`、密码文件或备份提交到仓库。
 
-将 HTTPS 代理指向 `http://127.0.0.1:8090`，转发 `/`、`/favicon.svg`、`/favicon.ico`、`/healthz` 和 `/v1/`；长轮询最长 25 秒，代理超时应更长。客户端填写 HTTPS 根地址、账户和密码进行配对。HTTPS 保护传输，但服务端运行时可读取正文；当前不提供端到端加密。
+将 HTTPS 代理指向 `http://127.0.0.1:8090`，转发 `/`、`/favicon.svg`、`/favicon.ico`、`/healthz` 和 `/api/`；长轮询最长 25 秒，代理超时应更长。客户端填写 HTTPS 根地址、账户和密码进行配对。HTTPS 保护传输，但服务端运行时可读取正文；当前不提供端到端加密。
 
 历史默认保留 7 天；可在 `.env` 中设置 `RCS_HISTORY_RETENTION_DAYS` 为 1–3650 天，并重新创建容器。当前文本始终保留，消息 ID 和取消回执至少保留 30 天；清理不等于安全擦除。
 
@@ -87,7 +89,7 @@ curl http://127.0.0.1:8090/healthz
 
 明文数据库迁移前先停止服务并备份，然后运行 `docker compose run --rm --no-deps rustclipsync --migrate-db`。迁移保留明文备份，需单独保护或在确认后处理。
 
-恢复本协议的数据库备份后，在服务停止且无其他进程使用数据库时运行 `docker compose run --rm --no-deps rustclipsync --rotate-v1-epoch`。这会撤销设备令牌并更换实例标识，所有设备须重新配对。回退旧服务时应恢复与旧镜像匹配的数据库备份和客户端。
+恢复本协议的数据库备份后，在服务停止且无其他进程使用数据库时运行 `docker compose run --rm --no-deps rustclipsync --rotate-epoch`。这会撤销设备令牌并更换实例标识，所有设备须重新配对。回退旧服务时应恢复与旧镜像匹配的数据库备份和客户端。
 
 ## 开发验证
 
@@ -96,7 +98,7 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo build --release --locked
-python3 benchmarks/v1_benchmark.py target/release/rustclipsync-server
+python3 benchmarks/api_benchmark.py target/release/rustclipsync-server
 ```
 
 基准使用临时加密数据库与合成文本，不代表公网性能。服务端采用 MIT 许可；客户端保留各自许可。

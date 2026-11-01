@@ -1,4 +1,4 @@
-# RustClipSync V1：最新状态同步开发与验收计划
+# RustClipSync：最新状态同步开发与验收计划
 
 ## 范围与切换
 

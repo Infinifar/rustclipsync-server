@@ -79,12 +79,12 @@ def main():
             time.sleep(0.1)
             baseline_kib = peak[0]
             payload = json.dumps({"deviceId": device, "deviceToken": token}).encode()
-            epoch = json.loads(request("POST", "/v1/devices", basic, payload,
+            epoch = json.loads(request("POST", "/api/devices", basic, payload,
                                        {"Content-Type": "application/json"})[1])["epoch"]
 
             def read_state(_):
                 started = time.perf_counter()
-                status, _ = request("GET", "/v1/state", bearer)
+                status, _ = request("GET", "/api/state", bearer)
                 assert status == 200
                 return (time.perf_counter() - started) * 1000
 
@@ -98,14 +98,14 @@ def main():
             for revision in range(200):
                 message = str(uuid.uuid4())
                 tick = time.perf_counter()
-                result = request("PUT", f"/v1/messages/{message}", bearer, b"x" * 1024,
+                result = request("PUT", f"/api/messages/{message}", bearer, b"x" * 1024,
                                  {"X-RCS-Epoch": epoch, "X-RCS-Base-Revision": str(revision), "X-RCS-Sensitive": "0"})
                 assert json.loads(result[1])["revision"] == revision + 1
                 writes.append((time.perf_counter() - tick) * 1000)
             write_seconds = time.perf_counter() - started
             before_large = peak[0]
             tick = time.perf_counter()
-            result = request("PUT", f"/v1/messages/{uuid.uuid4()}", bearer, b"z" * (10 * 1024 * 1024),
+            result = request("PUT", f"/api/messages/{uuid.uuid4()}", bearer, b"z" * (10 * 1024 * 1024),
                              {"X-RCS-Epoch": epoch, "X-RCS-Base-Revision": "200", "X-RCS-Sensitive": "0"})
             assert json.loads(result[1])["revision"] == 201
             large_ms = (time.perf_counter() - tick) * 1000

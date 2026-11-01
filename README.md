@@ -1,5 +1,7 @@
 # RustClipSync Server
 
+This release uses only `/api/...`. Update the clients and any path-filtering reverse proxy together with the server; device tokens, cursors and encrypted data remain unchanged.
+
 English · [简体中文](README-ZH.md)
 
 RustClipSync is a lightweight Rust text clipboard server for personal devices, designed for low memory use. Its dedicated protocol uses message UUIDs, server revisions and device cursors to handle retries and duplicate notifications; devices catch up only to the latest content after being offline.
@@ -10,7 +12,7 @@ RustClipSync is a lightweight Rust text clipboard server for personal devices, d
 - Omarchy: [Omaclipsync plugin](https://github.com/Infinifar/omaclipsync).
 - Windows and Linux: [RustClipSync Desktop](https://github.com/Infinifar/rustclipsync-desktop), with a WinUI 3 interface on Windows 11 and a standalone Qt 6/QML interface on Linux, plus background synchronization, encrypted history and a sensitive inbox. Linux x86_64 packages target Debian 12, Ubuntu 24.04, Fedora 43 and Arch/Omarchy; the Linux app does not require Omarchy or Quickshell. Download from [Releases](https://github.com/Infinifar/rustclipsync-desktop/releases); Windows installers are currently unsigned. See the [Linux guide](https://github.com/Infinifar/rustclipsync-desktop/blob/main/LINUX.md) for installation and desktop requirements: X11 is supported; Wayland requires data-control support, and GNOME/Wayland sessions without it are currently unsupported.
 - Shared client library: [rustclipsync-core](https://github.com/Infinifar/rustclipsync-core) implements the Rust synchronization state machine and HTTPS protocol; RustClipSync Desktop on Windows/Linux and the Omaclipsync plugin provide their own platform adapters.
-- Other clients: see the [protocol and integration guide](PROTOCOL-V1.md). Registration starts at the current revision without replaying old clipboard content. Offline devices catch up to the latest state, and conflicts with pending local content require user confirmation. Clipboard writes and local cursors cannot be committed atomically, so an unexpected crash cannot guarantee exactly-once effects.
+- Other clients: see the [protocol and integration guide](PROTOCOL.md). Registration starts at the current revision without replaying old clipboard content. Offline devices catch up to the latest state, and conflicts with pending local content require user confirmation. Clipboard writes and local cursors cannot be committed atomically, so an unexpected crash cannot guarantee exactly-once effects.
 
 Only UTF-8 text is synchronized, up to 10 MiB per item. Images, files and multiple accounts are not supported. Marked sensitive text is not synchronized by default; only content marked by its source application can be recognized.
 
@@ -29,7 +31,7 @@ These projects have not undergone a controlled comparative performance or securi
 
 ## Docker Compose deployment
 
-Docker Compose and an HTTPS reverse proxy or Cloudflare Tunnel are required. This `docker-compose.yml` uses `latest`. Back up data before upgrading, then run `docker compose pull` and `docker compose up -d`. To pin a release, change the tag to `v1.1.0`. The container port is published only on host loopback `127.0.0.1:8090`:
+Docker Compose and an HTTPS reverse proxy or Cloudflare Tunnel are required. This `docker-compose.yml` uses `latest`. Back up data before upgrading, then run `docker compose pull` and `docker compose up -d`. To pin a release, change the tag to `v2.0.0`. The container port is published only on host loopback `127.0.0.1:8090`:
 
 ```yaml
 services:
@@ -77,7 +79,7 @@ curl http://127.0.0.1:8090/healthz
 
 `RCS_DB_KEY` in `.env` is a 64-character hexadecimal representation of a 32-byte key. Back it up securely: the database cannot be recovered without it. Docker administrators can read container environment variables. Changing the key alone does not re-encrypt the database. The account password registers and manages devices; synchronization uses individual device tokens. Do not commit `.env`, the password file or backups.
 
-Point the HTTPS proxy to `http://127.0.0.1:8090` and forward `/`, `/favicon.svg`, `/favicon.ico`, `/healthz` and `/v1/`. Long polls can last 25 seconds, so configure a longer proxy timeout. Pair clients using the HTTPS root URL, username and password. HTTPS protects transport, but the server can read text while running; end-to-end encryption is not currently provided.
+Point the HTTPS proxy to `http://127.0.0.1:8090` and forward `/`, `/favicon.svg`, `/favicon.ico`, `/healthz` and `/api/`. Long polls can last 25 seconds, so configure a longer proxy timeout. Pair clients using the HTTPS root URL, username and password. HTTPS protects transport, but the server can read text while running; end-to-end encryption is not currently provided.
 
 History is retained for seven days by default. Set `RCS_HISTORY_RETENTION_DAYS` in `.env` to 1–3650 and recreate the container to change it. Current text is always retained; message IDs and cancellation receipts are kept for at least 30 days. Cleanup is not secure erasure.
 
@@ -87,7 +89,7 @@ Before upgrading from the old protocol, stop the service and back up the complet
 
 Before migrating a plaintext database, stop the service and back it up, then run `docker compose run --rm --no-deps rustclipsync --migrate-db`. The migration retains a plaintext backup; protect it separately or handle it after verification.
 
-After restoring a database backup from this protocol, stop the service and ensure no other process is using the database, then run `docker compose run --rm --no-deps rustclipsync --rotate-v1-epoch`. This revokes device tokens and changes the instance identifier; all devices must pair again. When rolling back the service, restore the database backup and clients matching the old image.
+After restoring a database backup from this protocol, stop the service and ensure no other process is using the database, then run `docker compose run --rm --no-deps rustclipsync --rotate-epoch`. This revokes device tokens and changes the instance identifier; all devices must pair again. When rolling back the service, restore the database backup and clients matching the old image.
 
 ## Development and verification
 
@@ -96,7 +98,7 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo build --release --locked
-python3 benchmarks/v1_benchmark.py target/release/rustclipsync-server
+python3 benchmarks/api_benchmark.py target/release/rustclipsync-server
 ```
 
 The benchmark uses a temporary encrypted database and synthetic text; it does not represent public-network performance. The server is licensed under MIT; clients retain their own licenses.

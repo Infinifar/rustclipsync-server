@@ -91,22 +91,22 @@ pub fn clean_history(db: &Connection, days: u32) -> rusqlite::Result<()> {
 pub fn router() -> Router<Shared> {
     Router::new()
         .route(
-            "/v1/devices",
+            "/api/devices",
             post(register)
                 .layer(DefaultBodyLimit::max(4096))
                 .get(list_devices),
         )
-        .route("/v1/devices/{id}", delete(revoke))
-        .route("/v1/state", get(state))
-        .route("/v1/changes", get(changes))
-        .route("/v1/messages/{id}/content", get(content))
+        .route("/api/devices/{id}", delete(revoke))
+        .route("/api/state", get(state))
+        .route("/api/changes", get(changes))
+        .route("/api/messages/{id}/content", get(content))
         .route(
-            "/v1/messages/{id}",
+            "/api/messages/{id}",
             put(commit)
                 .layer(DefaultBodyLimit::max(MAX_TEXT))
                 .delete(cancel),
         )
-        .route("/v1/ack", post(ack).layer(DefaultBodyLimit::max(4096)))
+        .route("/api/ack", post(ack).layer(DefaultBodyLimit::max(4096)))
 }
 
 fn canonical_uuid(s: &str) -> bool {
@@ -173,7 +173,7 @@ struct UploadPermit(#[allow(dead_code)] OwnedSemaphorePermit);
 impl FromRequestParts<Shared> for UploadPermit {
     type Rejection = StatusCode;
     async fn from_request_parts(_: &mut Parts, app: &Shared) -> Result<Self, Self::Rejection> {
-        Arc::clone(&app.v1_uploads)
+        Arc::clone(&app.uploads)
             .try_acquire_owned()
             .map(Self)
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
@@ -299,7 +299,7 @@ async fn revoke(
     if removed == 0 {
         return Err(StatusCode::NOT_FOUND);
     }
-    let _ = app.v1_events.send(());
+    let _ = app.events.send(());
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -345,11 +345,11 @@ async fn changes(
     Query(query): Query<ChangesQuery>,
 ) -> Result<Response, StatusCode> {
     let _permit = app
-        .v1_waiters
+        .waiters
         .try_acquire()
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     // Subscribe before checking state to avoid missing a concurrent commit.
-    let mut events = app.v1_events.subscribe();
+    let mut events = app.events.subscribe();
     for attempt in 0..2 {
         let current = read_state(&*app.db.lock().await, &device)?;
         if query.epoch != current.epoch {
@@ -497,7 +497,7 @@ async fn commit(
     .map_err(db_error)?;
     tx.commit().map_err(db_error)?;
     drop(db);
-    let _ = app.v1_events.send(());
+    let _ = app.events.send(());
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(CommitResult {
@@ -674,14 +674,14 @@ mod tests {
     fn app() -> (Shared, Router) {
         let db = Connection::open_in_memory().unwrap();
         init(&db).unwrap();
-        let (v1_events, _) = broadcast::channel(16);
+        let (events, _) = broadcast::channel(16);
         let app = Arc::new(crate::App {
             db: Mutex::new(db),
             user: "test".into(),
             password: "long-password".into(),
-            v1_events,
-            v1_waiters: Arc::new(Semaphore::new(8)),
-            v1_uploads: Arc::new(Semaphore::new(2)),
+            events,
+            waiters: Arc::new(Semaphore::new(8)),
+            uploads: Arc::new(Semaphore::new(2)),
         });
         (Arc::clone(&app), crate::router(app))
     }
@@ -717,7 +717,7 @@ mod tests {
         let token = "ab".repeat(32);
         let basic = format!("Basic {}", STANDARD.encode("test:long-password"));
         let body = json!({"deviceId": id, "deviceToken": token}).to_string();
-        let response = request(app, Method::POST, "/v1/devices", &basic, body).await;
+        let response = request(app, Method::POST, "/api/devices", &basic, body).await;
         assert_eq!(response.status(), StatusCode::OK);
         (
             id.clone(),
@@ -727,9 +727,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_exposes_public_site_and_v1_routes() {
+    async fn service_exposes_public_site_and_current_api_routes() {
         let (_, app) = app();
         let basic = format!("Basic {}", STANDARD.encode("test:long-password"));
+        assert_eq!(
+            request(&app, Method::GET, "/api/state", "", Body::empty())
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        for obsolete in ["/v1/state", "/v1/devices", "/SyncClipboard.json"] {
+            assert_eq!(
+                request(&app, Method::GET, obsolete, &basic, Body::empty())
+                    .await
+                    .status(),
+                StatusCode::NOT_FOUND
+            );
+        }
         assert_eq!(
             request(&app, Method::GET, "/healthz", "", Body::empty())
                 .await
@@ -780,7 +794,7 @@ mod tests {
         let make = |sensitive: Option<&str>| {
             let mut req = Request::builder()
                 .method(Method::PUT)
-                .uri(format!("/v1/messages/{id}"))
+                .uri(format!("/api/messages/{id}"))
                 .header(header::AUTHORIZATION, &auth)
                 .header("x-rcs-epoch", epoch)
                 .header("x-rcs-base-revision", "0");
@@ -798,7 +812,7 @@ mod tests {
             StatusCode::OK
         );
         let state =
-            json_body(request(&app, Method::GET, "/v1/state", &auth, Body::empty()).await).await;
+            json_body(request(&app, Method::GET, "/api/state", &auth, Body::empty()).await).await;
         assert_eq!(state["sensitive"], true);
         assert_eq!(
             app.clone().oneshot(make(Some("0"))).await.unwrap().status(),
@@ -818,7 +832,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::PUT)
-                    .uri(format!("/v1/messages/{id}"))
+                    .uri(format!("/api/messages/{id}"))
                     .header(header::AUTHORIZATION, auth)
                     .header("x-rcs-epoch", epoch)
                     .header("x-rcs-base-revision", base)
@@ -836,14 +850,15 @@ mod tests {
         let (a_id, a, a_reg) = register_device(&app).await;
         let (_, b, b_reg) = register_device(&app).await;
         assert_eq!(
-            request(&app, Method::GET, "/v1/devices", &a, Body::empty())
+            request(&app, Method::GET, "/api/devices", &a, Body::empty())
                 .await
                 .status(),
             StatusCode::UNAUTHORIZED
         );
         let basic = format!("Basic {}", STANDARD.encode("test:long-password"));
         let devices =
-            json_body(request(&app, Method::GET, "/v1/devices", &basic, Body::empty()).await).await;
+            json_body(request(&app, Method::GET, "/api/devices", &basic, Body::empty()).await)
+                .await;
         assert_eq!(devices.as_array().unwrap().len(), 2);
         assert!(
             devices
@@ -879,14 +894,14 @@ mod tests {
             "first pairing starts at current revision"
         );
         let observed =
-            json_body(request(&app, Method::GET, "/v1/state", &b, Body::empty()).await).await;
+            json_body(request(&app, Method::GET, "/api/state", &b, Body::empty()).await).await;
         assert_eq!(observed["revision"], 1);
         assert_eq!(observed["sourceDeviceId"], a_id);
         assert_eq!(observed["messageId"], id1);
         let read = request(
             &app,
             Method::GET,
-            &format!("/v1/messages/{id1}/content"),
+            &format!("/api/messages/{id1}/content"),
             &b,
             Body::empty(),
         )
@@ -895,19 +910,19 @@ mod tests {
         let ack_body =
             json!({"epoch":epoch,"revision":1,"messageId":id1,"result":"applied"}).to_string();
         assert_eq!(
-            request(&app, Method::POST, "/v1/ack", &b, ack_body.clone())
+            request(&app, Method::POST, "/api/ack", &b, ack_body.clone())
                 .await
                 .status(),
             StatusCode::OK
         );
         assert_eq!(
-            json_body(request(&app, Method::POST, "/v1/ack", &b, ack_body).await).await["ackRevision"],
+            json_body(request(&app, Method::POST, "/api/ack", &b, ack_body).await).await["ackRevision"],
             1
         );
         let invalid_self =
             json!({"epoch":epoch,"revision":1,"messageId":id1,"result":"self"}).to_string();
         assert_eq!(
-            request(&app, Method::POST, "/v1/ack", &b, invalid_self)
+            request(&app, Method::POST, "/api/ack", &b, invalid_self)
                 .await
                 .status(),
             StatusCode::BAD_REQUEST
@@ -925,7 +940,7 @@ mod tests {
             request(
                 &app,
                 Method::GET,
-                &format!("/v1/messages/{id1}/content"),
+                &format!("/api/messages/{id1}/content"),
                 &c,
                 Body::empty()
             )
@@ -934,7 +949,7 @@ mod tests {
             StatusCode::GONE
         );
         assert_eq!(
-            json_body(request(&app, Method::GET, "/v1/state", &b, Body::empty()).await).await["revision"],
+            json_body(request(&app, Method::GET, "/api/state", &b, Body::empty()).await).await["revision"],
             2
         );
     }
@@ -955,12 +970,12 @@ mod tests {
         let skipped =
             json!({"epoch":epoch,"revision":1,"messageId":first,"result":"skipped"}).to_string();
         for _ in 0..2 {
-            let response = request(&app, Method::POST, "/v1/ack", &b, skipped.clone()).await;
+            let response = request(&app, Method::POST, "/api/ack", &b, skipped.clone()).await;
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(json_body(response).await["ackRevision"], 1);
         }
         let source =
-            json_body(request(&app, Method::GET, "/v1/state", &a, Body::empty()).await).await;
+            json_body(request(&app, Method::GET, "/api/state", &a, Body::empty()).await).await;
         assert_eq!(
             source["ackRevision"], 0,
             "another device's ACK must be independent"
@@ -969,7 +984,7 @@ mod tests {
         let body = request(
             &app,
             Method::GET,
-            &format!("/v1/messages/{first}/content"),
+            &format!("/api/messages/{first}/content"),
             &b,
             Body::empty(),
         )
@@ -987,7 +1002,7 @@ mod tests {
         let response = request(
             &app,
             Method::GET,
-            &format!("/v1/changes?epoch={epoch}&after=1"),
+            &format!("/api/changes?epoch={epoch}&after=1"),
             &b,
             Body::empty(),
         )
@@ -1000,14 +1015,14 @@ mod tests {
 
         let applied =
             json!({"epoch":epoch,"revision":2,"messageId":second,"result":"applied"}).to_string();
-        let response = request(&app, Method::POST, "/v1/ack", &b, applied).await;
+        let response = request(&app, Method::POST, "/api/ack", &b, applied).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(json_body(response).await["ackRevision"], 2);
-        let stale = request(&app, Method::POST, "/v1/ack", &b, skipped).await;
+        let stale = request(&app, Method::POST, "/api/ack", &b, skipped).await;
         assert_eq!(stale.status(), StatusCode::OK);
         assert_eq!(json_body(stale).await["ackRevision"], 2);
         let final_state =
-            json_body(request(&app, Method::GET, "/v1/state", &b, Body::empty()).await).await;
+            json_body(request(&app, Method::GET, "/api/state", &b, Body::empty()).await).await;
         assert_eq!(final_state["ackRevision"], 2);
         assert_eq!(final_state["revision"], 2);
         assert_eq!(final_state["messageId"], second);
@@ -1018,18 +1033,18 @@ mod tests {
         let (shared, app) = app();
         let (id, auth, reg) = register_device(&app).await;
         let epoch = reg["epoch"].as_str().unwrap();
-        let url = format!("/v1/changes?epoch={epoch}&after=0");
-        let capacity = shared.v1_waiters.available_permits();
+        let url = format!("/api/changes?epoch={epoch}&after=0");
+        let capacity = shared.waiters.available_permits();
         let mut poll = std::pin::pin!(request(&app, Method::GET, &url, &auth, Body::empty()));
         // Poll to the actual waiting point; no sleep or scheduling guess is needed.
         assert!(futures_util::poll!(poll.as_mut()).is_pending());
-        assert_eq!(shared.v1_waiters.available_permits(), capacity - 1);
+        assert_eq!(shared.waiters.available_permits(), capacity - 1);
 
         let basic = format!("Basic {}", STANDARD.encode("test:long-password"));
         let removed = request(
             &app,
             Method::DELETE,
-            &format!("/v1/devices/{id}"),
+            &format!("/api/devices/{id}"),
             &basic,
             Body::empty(),
         )
@@ -1039,7 +1054,7 @@ mod tests {
             panic!("device revocation must wake the waiting request without the 25-second timeout");
         };
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(shared.v1_waiters.available_permits(), capacity);
+        assert_eq!(shared.waiters.available_permits(), capacity);
     }
 
     #[tokio::test]
@@ -1048,7 +1063,7 @@ mod tests {
         let (_, a, reg) = register_device(&app).await;
         let (b_id, b, _) = register_device(&app).await;
         let epoch = reg["epoch"].as_str().unwrap().to_owned();
-        let poll_url = format!("/v1/changes?epoch={epoch}&after=0");
+        let poll_url = format!("/api/changes?epoch={epoch}&after=0");
         let poll = request(&app, Method::GET, &poll_url, &b, Body::empty());
         let writer = async {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1062,7 +1077,7 @@ mod tests {
             request(
                 &app,
                 Method::DELETE,
-                &format!("/v1/devices/{b_id}"),
+                &format!("/api/devices/{b_id}"),
                 &basic,
                 Body::empty()
             )
@@ -1071,7 +1086,7 @@ mod tests {
             StatusCode::NO_CONTENT
         );
         assert_eq!(
-            request(&app, Method::GET, "/v1/state", &b, Body::empty())
+            request(&app, Method::GET, "/api/state", &b, Body::empty())
                 .await
                 .status(),
             StatusCode::UNAUTHORIZED
@@ -1090,7 +1105,7 @@ mod tests {
         let response = request(
             &app,
             Method::PUT,
-            &format!("/v1/messages/{}", Uuid::new_v4()),
+            &format!("/api/messages/{}", Uuid::new_v4()),
             "Bearer invalid",
             Body::from_stream(stream),
         )
@@ -1158,7 +1173,7 @@ mod tests {
         let cancel_request = || {
             Request::builder()
                 .method(Method::DELETE)
-                .uri(format!("/v1/messages/{obsolete}"))
+                .uri(format!("/api/messages/{obsolete}"))
                 .header(header::AUTHORIZATION, &a)
                 .header("x-rcs-epoch", epoch)
                 .body(Body::empty())
@@ -1185,7 +1200,7 @@ mod tests {
         );
         let cancel_committed = Request::builder()
             .method(Method::DELETE)
-            .uri(format!("/v1/messages/{latest}"))
+            .uri(format!("/api/messages/{latest}"))
             .header(header::AUTHORIZATION, &a)
             .header("x-rcs-epoch", epoch)
             .body(Body::empty())
@@ -1209,7 +1224,7 @@ mod tests {
         );
         rotate_epoch(&mut *shared.db.lock().await).unwrap();
         assert_eq!(
-            request(&app, Method::GET, "/v1/state", &a, Body::empty())
+            request(&app, Method::GET, "/api/state", &a, Body::empty())
                 .await
                 .status(),
             StatusCode::UNAUTHORIZED
@@ -1228,7 +1243,7 @@ mod tests {
             let id = Uuid::new_v4().to_string();
             let cancellation = Request::builder()
                 .method(Method::DELETE)
-                .uri(format!("/v1/messages/{id}"))
+                .uri(format!("/api/messages/{id}"))
                 .header(header::AUTHORIZATION, &auth)
                 .header("x-rcs-epoch", epoch)
                 .body(Body::empty())
@@ -1239,7 +1254,7 @@ mod tests {
             );
             let cancellation = json_body(cancelled.unwrap()).await;
             let current =
-                json_body(request(&app, Method::GET, "/v1/state", &auth, Body::empty()).await)
+                json_body(request(&app, Method::GET, "/api/state", &auth, Body::empty()).await)
                     .await;
             match cancellation["state"].as_str().unwrap() {
                 "cancelled" => {
@@ -1264,14 +1279,14 @@ mod tests {
         let id = Uuid::new_v4().to_string();
         {
             let db = crate::database::open(&path, &key).unwrap();
-            let (v1_events, _) = broadcast::channel(16);
+            let (events, _) = broadcast::channel(16);
             let state = Arc::new(crate::App {
                 db: Mutex::new(db),
                 user: "test".into(),
                 password: "long-password".into(),
-                v1_events,
-                v1_waiters: Arc::new(Semaphore::new(8)),
-                v1_uploads: Arc::new(Semaphore::new(2)),
+                events,
+                waiters: Arc::new(Semaphore::new(8)),
+                uploads: Arc::new(Semaphore::new(2)),
             });
             let app = crate::router(state);
             let (_, auth, reg) = register_device(&app).await;
