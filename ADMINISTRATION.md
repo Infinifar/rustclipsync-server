@@ -4,22 +4,18 @@ The optional `/admin/` page manages access to one shared clipboard. It does not 
 
 ## Enable with Docker Compose
 
-Keep the existing `docker-compose.yml` and `password.secret` for client authentication. Add these non-secret settings to `.env` (choose an administrator name different from `RCS_USER` and any existing device account):
+Keep the existing `docker-compose.yml` and `password.secret` for client authentication. Set the independent administrator credentials and public origin in the local `.env` file (choose an administrator name different from `RCS_USER` and any existing device account):
 
 ```dotenv
 RCS_ADMIN_USER=administrator
+RCS_ADMIN_PASSWORD='replace-with-a-unique-strong-password'
 RCS_WEB_ORIGIN=https://sync.example.com
 ```
 
-Create a separate administrator password file. Use a unique, strong password, at least 12 bytes:
+Use a unique password of at least 12 bytes. Single-quote the password in `.env` so Compose does not interpolate `$` characters. Protect this file and recreate the container after changing credentials:
 
 ```bash
-umask 077
-read -rs -p 'Administrator password: ' rcs_admin_password; printf '\n'
-printf '%s' "$rcs_admin_password" > admin-password.secret
-unset rcs_admin_password
-sudo chgrp 10001 admin-password.secret
-chmod 0440 admin-password.secret
+chmod 0600 .env
 docker compose -f docker-compose.yml -f docker-compose.admin.yml up -d
 ```
 
@@ -66,7 +62,7 @@ The page refreshes metadata every 15 seconds while visible. Background refresh d
 
 ## Configuration outside Docker
 
-`RCS_WEB_ENABLED` defaults to `false`. Enable with `true` and set `RCS_WEB_ORIGIN`, `RCS_ADMIN_USER` and `RCS_ADMIN_PASSWORD_FILE`. Alternatively `RCS_ADMIN_PASSWORD` supplies the administrator secret directly, but environment variables can be inspected by process/container administrators. If both are present, the file takes precedence. Administrator credentials can also be configured with the web page disabled, for native device management and pairing clients as the administrator. They must not collide with an existing managed device username or the existing sync username.
+`RCS_WEB_ENABLED` defaults to `false`. Enable with `true` and supply `RCS_WEB_ORIGIN`, `RCS_ADMIN_USER` and `RCS_ADMIN_PASSWORD` in the process environment. Compose reads these values from the local `.env`; when running the binary directly, export them through your service manager. No separate administrator password file is needed. Environment variables can be inspected by process/container administrators; never commit `.env` or publish resolved Compose output. Remove any old `RCS_ADMIN_PASSWORD_FILE` setting when migrating an existing deployment. Administrator credentials can also be configured with the web page disabled, for native device management and pairing clients as the administrator. They must not collide with an existing managed device username or the existing sync username.
 
 Schema additions are automatic when opening the database and preserve existing token hashes, epoch, cursors and current clipboard. Back up the complete database and key before upgrading, as with any schema change. No real client needs to re-pair merely to enable the management page.
 
