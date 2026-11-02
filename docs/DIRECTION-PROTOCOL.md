@@ -97,3 +97,14 @@ emits an alert. Invalid writes are rejected. Persist audit actor/time/old/new
 value. Do not log tokens, session IDs, passwords or clipboard text. Metrics cover
 reports/errors/source, filters/unknown, revocations/expiry, backfills, window and
 configuration alerts; expose authenticated management statistics.
+
+## Administrator diagnostics
+
+`GET /api/admin/devices` adds a read-only `sync` object with effective direction,
+pause, report state (`reported`, `unknown`, `revoked`, `expired`), report timestamp,
+activity expiry, last report source, direction version and active data lease.
+No session identifiers or text are returned. Reads do not renew TTL or presence.
+Acceptance is not proof of client ACK receipt or a system clipboard write.
+The management page has Devices / Accounts / Settings tabs; the global backfill
+window, audit and process-lifetime routing counters are under Settings.
+Native protocol-3 endpoints and client direction negotiation are unchanged.

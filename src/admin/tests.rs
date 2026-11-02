@@ -1076,3 +1076,171 @@ async fn corrupt_text_window_can_be_repaired_by_an_administrator() {
     assert_eq!(value["backfillWindowMinutes"], 5);
     assert_eq!(value["audit"][0]["oldValue"], Value::Null);
 }
+
+#[tokio::test]
+async fn device_sync_diagnostics_are_effective_read_only_and_redacted() {
+    let (shared, app) = app();
+    let (cookie, _) = login(&app).await;
+    let now = crate::presence::unix_time();
+    let cases = [
+        (None, false, "", None, 0, "unknown", false),
+        (
+            Some("PUSH_ONLY"),
+            false,
+            "update",
+            Some(now + 300),
+            now + 100,
+            "reported",
+            true,
+        ),
+        (
+            Some("RECEIVE_ONLY"),
+            false,
+            "update",
+            Some(now + 300),
+            now + 100,
+            "reported",
+            true,
+        ),
+        (
+            Some("BIDIRECTIONAL"),
+            false,
+            "update",
+            Some(now + 300),
+            now + 100,
+            "reported",
+            true,
+        ),
+        (
+            Some("BIDIRECTIONAL"),
+            true,
+            "update",
+            Some(now + 300),
+            now + 100,
+            "reported",
+            false,
+        ),
+        (
+            Some("RECEIVE_ONLY"),
+            false,
+            "update",
+            Some(now - 300),
+            now + 100,
+            "expired",
+            false,
+        ),
+        (None, false, "expired", Some(now - 300), 0, "expired", false),
+        (None, false, "revoke", None, 0, "revoked", false),
+        (
+            Some("RECEIVE_ONLY"),
+            false,
+            "update",
+            Some(now + 300),
+            now - 100,
+            "reported",
+            false,
+        ),
+    ];
+    {
+        let db = shared.db.lock().await;
+        for (i, (direction, paused, op, expires, lease, _, _)) in cases.iter().enumerate() {
+            let id = format!("00000000-0000-4000-8000-{i:012}");
+            db.execute("INSERT INTO v1_devices(id,token_hash,ack_revision,last_seen) VALUES(?1,x'012345',7,?2)", params![id, now - 500]).unwrap();
+            if i > 0 {
+                db.execute("INSERT INTO rcs_direction(device_id,session_id,version,direction,paused,updated,expires,lease_until,last_op,last_payload,source) VALUES(?1,'private-session',9,?2,?3,?4,?5,?6,?7,'private-payload','WS')",params![id,direction,paused,now-100,expires,lease,op]).unwrap();
+            }
+        }
+        db.execute_batch("CREATE TABLE admin_test_writes(n INTEGER); INSERT INTO admin_test_writes VALUES(0);
+            CREATE TRIGGER admin_test_direction AFTER UPDATE ON rcs_direction BEGIN UPDATE admin_test_writes SET n=n+1; END;
+            CREATE TRIGGER admin_test_device AFTER UPDATE ON v1_devices BEGIN UPDATE admin_test_writes SET n=n+1; END;").unwrap();
+    }
+    for _ in 0..2 {
+        let response = send(
+            &app,
+            Method::GET,
+            "/api/admin/devices",
+            &[("cookie", &cookie)],
+            Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let devices = body(response).await;
+        for (i, (direction, paused, _, _, _, state, lease)) in cases.iter().enumerate() {
+            let sync = &devices[i]["sync"];
+            assert_eq!(
+                sync["reportState"], *state,
+                "case {i}: effective report state"
+            );
+            assert_eq!(
+                sync["direction"],
+                if *state == "reported" {
+                    json!(direction)
+                } else {
+                    Value::Null
+                },
+                "case {i}: effective direction"
+            );
+            assert_eq!(sync["paused"], *paused, "case {i}: pause");
+            assert_eq!(sync["dataLeaseActive"], *lease, "case {i}: data lease");
+            assert_eq!(
+                devices[i]["online"], false,
+                "read must not mark a device online"
+            );
+            assert_eq!(devices[i]["lastSeen"], now - 500);
+            assert_eq!(devices[i]["ackRevision"], 7);
+            if i > 0 {
+                assert_eq!(sync["version"], 9);
+                assert_eq!(sync["lastReportSource"], "ws");
+                assert_eq!(sync["reportedAt"], now - 100);
+            }
+        }
+        let encoded = devices.to_string();
+        for secret in [
+            "private-session",
+            "private-payload",
+            "tokenHash",
+            "sessionId",
+            "password",
+        ] {
+            assert!(!encoded.contains(secret), "must not expose {secret}");
+        }
+    }
+    assert_eq!(
+        shared
+            .db
+            .lock()
+            .await
+            .query_row("SELECT n FROM admin_test_writes", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "viewing diagnostics must not refresh TTL, cursors or presence"
+    );
+}
+
+#[tokio::test]
+async fn device_credentials_cannot_read_admin_diagnostics() {
+    let (_, app) = app();
+    let (_, bearer, _) = register(&app, "legacy", "fixture-legacy-password").await;
+    for path in ["/api/admin/devices", "/api/admin/sync-settings"] {
+        for authorization in [
+            &bearer,
+            &basic("legacy", "fixture-legacy-password"),
+            &basic("administrator", PASSWORD),
+        ] {
+            assert_eq!(
+                send(
+                    &app,
+                    Method::GET,
+                    path,
+                    &[("authorization", authorization)],
+                    Value::Null
+                )
+                .await
+                .status(),
+                StatusCode::UNAUTHORIZED,
+                "{path} must require a browser administrator session"
+            );
+        }
+    }
+}

@@ -345,10 +345,74 @@ struct DeviceRow {
     ack_revision: i64,
     online: bool,
     last_seen: Option<i64>,
+    sync: DeviceSync,
+}
+#[derive(Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum ReportState {
+    Unknown,
+    Reported,
+    Revoked,
+    Expired,
+}
+/// Read-only projection: acceptance and a data lease do not prove client health.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceSync {
+    direction: Option<String>,
+    paused: bool,
+    report_state: ReportState,
+    reported_at: Option<i64>,
+    expires_at: Option<i64>,
+    last_report_source: Option<&'static str>,
+    version: Option<i64>,
+    data_lease_active: bool,
+}
+impl DeviceSync {
+    fn from_row(row: &rusqlite::Row<'_>, now: i64) -> rusqlite::Result<Self> {
+        let direction: Option<String> = row.get(6)?;
+        let paused: Option<bool> = row.get(7)?;
+        let expires_at: Option<i64> = row.get(9)?;
+        let lease: Option<i64> = row.get(10)?;
+        let op: Option<String> = row.get(11)?;
+        let source: Option<String> = row.get(12)?;
+        let report_state = match op.as_deref() {
+            Some("revoke") => ReportState::Revoked,
+            Some("expired") => ReportState::Expired,
+            _ if direction.is_some() && expires_at.is_some_and(|at| at <= now) => {
+                ReportState::Expired
+            }
+            _ if matches!(
+                direction.as_deref(),
+                Some("PUSH_ONLY" | "RECEIVE_ONLY" | "BIDIRECTIONAL")
+            ) && expires_at.is_some_and(|at| at > now) =>
+            {
+                ReportState::Reported
+            }
+            _ => ReportState::Unknown,
+        };
+        let active = report_state == ReportState::Reported;
+        let paused = active && paused.unwrap_or(false);
+        Ok(Self {
+            direction: if active { direction } else { None },
+            paused,
+            report_state,
+            reported_at: row.get(8)?,
+            expires_at,
+            last_report_source: match source.as_deref() {
+                Some("WS") => Some("ws"),
+                Some("HTTP") => Some("http"),
+                _ => None,
+            },
+            version: row.get(13)?,
+            data_lease_active: active && !paused && lease.is_some_and(|at| at > now),
+        })
+    }
 }
 async fn devices(State(app): State<Shared>, _: Admin) -> Result<impl IntoResponse, StatusCode> {
+    let now = crate::presence::unix_time();
     let db = app.db.lock().await;
-    let mut statement=db.prepare("SELECT d.id,d.label,d.account_id,a.username,d.ack_revision,d.last_seen FROM v1_devices d LEFT JOIN rcs_accounts a ON a.id=d.account_id ORDER BY d.id").map_err(db_error)?;
+    let mut statement=db.prepare("SELECT d.id,d.label,d.account_id,a.username,d.ack_revision,d.last_seen,s.direction,s.paused,s.updated,s.expires,s.lease_until,s.last_op,s.source,s.version FROM v1_devices d LEFT JOIN rcs_accounts a ON a.id=d.account_id LEFT JOIN rcs_direction s ON s.device_id=d.id ORDER BY d.id").map_err(db_error)?;
     let rows = statement
         .query_map([], |r| {
             Ok((
@@ -358,12 +422,13 @@ async fn devices(State(app): State<Shared>, _: Admin) -> Result<impl IntoRespons
                 r.get::<_, Option<String>>(3)?,
                 r.get::<_, i64>(4)?,
                 r.get::<_, Option<i64>>(5)?,
+                DeviceSync::from_row(r, now)?,
             ))
         })
         .map_err(db_error)?;
     let mut devices = Vec::new();
     for row in rows {
-        let (id, label, account_id, name, ack, last) = row.map_err(db_error)?;
+        let (id, label, account_id, name, ack, last, sync) = row.map_err(db_error)?;
         let name = if account_id.as_deref() == Some(auth::ADMIN_ACCOUNT) {
             app.auth
                 .admin
@@ -382,6 +447,7 @@ async fn devices(State(app): State<Shared>, _: Admin) -> Result<impl IntoRespons
             ack_revision: ack,
             online,
             last_seen,
+            sync,
         });
     }
     Ok(Json(devices))

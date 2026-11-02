@@ -42,7 +42,7 @@ try {
   const executable=process.env.CHROMIUM_BIN||['chromium','google-chrome','chromium-browser'].find(p=>spawnSync('which',[p],{stdio:'ignore'}).status===0);
   assert.ok(executable,'Chromium or CHROMIUM_BIN required');
   const profile=join(temp,'browser');
-  const args=['--headless=new',`--user-data-dir=${profile}`,'--password-store=basic','--no-first-run','--no-default-browser-check','--disable-sync','--disable-background-networking','--disable-extensions','--disable-component-update','--disable-gpu','--ignore-certificate-errors','--remote-debugging-port=0','--window-size=1505,1045','--force-device-scale-factor=1','about:blank'];
+  const args=['--headless=new',`--user-data-dir=${profile}`,'--password-store=basic','--no-first-run','--no-default-browser-check','--disable-sync','--disable-background-networking','--disable-extensions','--disable-component-update','--disable-gpu','--ignore-certificate-errors','--remote-debugging-port=0','--window-size=1440,1045','--force-device-scale-factor=1','about:blank'];
   if(process.getuid?.()===0)args.push('--no-sandbox');
   chrome=spawn(executable,args,{stdio:'ignore'});
   let devtools;
@@ -68,14 +68,17 @@ try {
   await command('Page.navigate',{url:origin+'/admin/'});await wait(`!!document.getElementById('login-form')`);
   await click('#language'); // Browser's fixture locale is en-US; select deterministic English below.
   if(await evaluate(`document.documentElement.lang!=='en'`))await click('#language');
-  await capture('login',1505,1045);
+  assert.equal(await evaluate(`document.documentElement.lang`),'en','English is the default');
+  const projectLink=await evaluate(`(()=>{const a=document.getElementById('github-project');return {href:a.href,target:a.target,rel:a.rel,text:a.textContent};})()`);
+  assert.equal(projectLink.href,'https://github.com/Infinifar/rustclipsync-server');assert.equal(projectLink.target,'_blank');assert.ok(projectLink.rel.includes('noopener')&&projectLink.rel.includes('noreferrer'));assert.ok(projectLink.text.includes('GitHub'));
+  await capture('login',1440,1045);
   await fill('username','administrator');await fill('password','wrong');await submit('login-form');
   await wait(`document.getElementById('login-error').textContent.includes('Incorrect')`);
   assert.equal(await evaluate(`document.getElementById('password').value`),'');
   await fill('password',password);await submit('login-form');await wait(`!document.getElementById('workspace').hidden && document.getElementById('account-rows').children.length===2`);
   await click('#create-account');await fill('account-username','shared-device');await fill('account-password',devicePassword);await submit('account-form');await wait(`!document.getElementById('account-dialog').open && document.getElementById('account-rows').children.length===3`);
   assert.equal(await evaluate(`document.getElementById('account-password').value`),'');
-  for(let i=0;i<4;i++){const user=i<2?'shared-device':i===2?'fixture':'administrator';const pass=i<2?devicePassword:i===2?'disposable-legacy-password':password;assert.equal((await rest('/api/devices',{method:'POST',headers:{Authorization:auth(user,pass)},body:{deviceId:ids[i],deviceToken:token}})).status,200);assert.equal((await rest(`/api/devices/${ids[i]}/sync-direction`,{method:'PUT',headers:{Authorization:bearer(ids[i])},body:{sessionId:ids[i],version:1,direction:'BIDIRECTIONAL',paused:false,connect:true}})).status,200);}
+  for(let i=0;i<4;i++){const user=i<2?'shared-device':i===2?'fixture':'administrator';const pass=i<2?devicePassword:i===2?'disposable-legacy-password':password;assert.equal((await rest('/api/devices',{method:'POST',headers:{Authorization:auth(user,pass)},body:{deviceId:ids[i],deviceToken:token}})).status,200);assert.equal((await rest(`/api/devices/${ids[i]}/sync-direction`,{method:'PUT',headers:{Authorization:bearer(ids[i])},body:{sessionId:ids[i],version:1,direction:['PUSH_ONLY','RECEIVE_ONLY','BIDIRECTIONAL','BIDIRECTIONAL'][i],paused:i===3,connect:true}})).status,200);}
   assert.equal((await rest('/api/state',{headers:{Authorization:bearer(ids[0])}})).status,200);
   await click('#refresh');await wait(`document.getElementById('device-rows').children.length===4`);
   for(let i=0;i<4;i++) {await click(`#device-rows tr:nth-child(${i+1}) button`);await fill('device-label',['Workstation','Phone','Laptop','Tablet'][i]);await submit('rename-form');await wait(`!document.getElementById('rename-dialog').open && document.querySelector('#device-rows tr:nth-child(${i+1}) .device-name').textContent===${JSON.stringify(['Workstation','Phone','Laptop','Tablet'][i])}`);}
@@ -83,34 +86,61 @@ try {
   assert.equal(await evaluate(`document.querySelectorAll('#device-rows img').length`),0);assert.equal(await evaluate(`window.testXss||0`),0);
   await click('#device-rows tr:nth-child(4) button');await fill('device-label','Tablet');await submit('rename-form');await wait(`!document.getElementById('rename-dialog').open && document.querySelector('#device-rows tr:nth-child(4) .device-name').textContent==='Tablet'`);
   assert.equal(await evaluate(`document.querySelectorAll('#device-rows .online').length`),4);
-  await capture('devices-desktop',1505,1045);
+  assert.deepEqual(await evaluate(`Array.from(document.querySelectorAll('.sync-direction'),e=>e.textContent)`),['Send only','Receive only','Bidirectional','Paused · Bidirectional']);
+  assert.equal(await evaluate(`document.getElementById('settings-panel').hidden`),true,'settings must not appear on Devices');
+  const beforeDiagnostics=await evaluate(`fetch('/api/admin/devices').then(r=>r.json())`);
+  await click('#device-rows details summary');
+  await click('#refresh');await wait(`!document.getElementById('refresh').disabled`);
+  assert.equal(await evaluate(`document.querySelector('#device-rows details').open`),true,'refresh keeps open diagnostics');
+  assert.deepEqual(await evaluate(`fetch('/api/admin/devices').then(r=>r.json())`),beforeDiagnostics,'viewing diagnostics must not refresh activity, TTL or cursor');
+  await capture('devices-details-desktop',1440,1045);await click('#device-rows details summary');
+  await capture('devices-desktop',1440,1045);
   await capture('devices-mobile',390,844,true);
   assert.ok(await evaluate(`document.documentElement.scrollWidth<=window.innerWidth`),'no mobile horizontal overflow');
-  await command('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'dark'}]});await capture('devices-dark',1505,1045);await command('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'light'}]});
+  await command('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'dark'}]});await capture('devices-dark',1440,1045);await command('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'light'}]});
+  await click('#tab-settings');
   assert.equal(await evaluate(`document.getElementById('backfill-window').value`),'5');
+  await fill('backfill-window','12');await evaluate(`document.getElementById('backfill-window').dispatchEvent(new Event('input',{bubbles:true}))`);
+  await click('#tab-devices');await click('#refresh');await wait(`!document.getElementById('refresh').disabled`);
+  await evaluate(`document.getElementById('tab-devices').focus()`);
+  for(const key of ['End','Home','ArrowRight','ArrowRight']){await command('Input.dispatchKeyEvent',{type:'keyDown',key});await command('Input.dispatchKeyEvent',{type:'keyUp',key});}
+  assert.equal(await evaluate(`document.activeElement.id`),'tab-settings');
+  assert.equal(await evaluate(`document.getElementById('settings-panel').hidden`),false);
+  assert.equal(await evaluate(`document.getElementById('devices-panel').hidden`),true);
+  assert.equal(await evaluate(`document.getElementById('backfill-window').value`),'12','tab changes and refresh preserve dirty input');
+  assert.equal(await evaluate(`fetch('/api/admin/sync-settings').then(r=>r.json()).then(v=>v.backfillWindowMinutes)`),5,'unsaved input does not change policy');
+  assert.equal(await evaluate(`document.querySelectorAll('#sync-metrics>div').length`),10);
+
   await fill('backfill-window','0');await submit('sync-settings-form');await wait(`document.getElementById('sync-settings-status').textContent.includes('saved') && document.getElementById('sync-settings-audit').textContent.includes('administrator')`);
   assert.equal(await evaluate(`fetch('/api/admin/sync-settings').then(r=>r.json()).then(v=>v.backfillWindowMinutes)`),0);
-  await evaluate(`document.getElementById('sync-settings-title').scrollIntoView({block:'center'})`);await capture('settings-desktop',1505,1045);
-  await command('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});await evaluate(`document.getElementById('sync-settings-title').scrollIntoView({block:'center'})`);await capture('settings-mobile',390,844,true);
+  await evaluate(`window.scrollTo(0,0)`);await capture('settings-desktop',1440,1045);
+  await command('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});await evaluate(`window.scrollTo(0,0)`);await capture('settings-mobile',390,844,true);
+  assert.ok(await evaluate(`document.documentElement.scrollWidth<=window.innerWidth`),'settings fit mobile');
+  await click('#language');await capture('settings-mobile-zh',390,844,true);await click('#language');
+  await command('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'dark'}]});await capture('settings-dark',1440,1045);await command('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'light'}]});
   await evaluate(`window.scrollTo(0,0)`);
   assert.equal(await evaluate(`fetch('/api/admin/sync-settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({backfillWindowMinutes:5})}).then(r=>r.status)`),403);
   const ax=await command('Accessibility.getFullAXTree');assert.equal(ax.nodes.filter(n=>n.role?.value==='button'&&!n.name?.value).length,0,'buttons need accessible names');
   const cookies=await command('Network.getCookies',{urls:[origin]});const cookie=cookies.cookies.find(c=>c.name==='__Host-rcs-admin');assert.ok(cookie?.httpOnly&&cookie.secure&&cookie.sameSite==='Strict');
   assert.equal(await evaluate('localStorage.length+sessionStorage.length'),0,'no credentials in web storage');
   assert.equal(await evaluate(`fetch('/api/admin/devices/${ids[0]}',{method:'DELETE'}).then(r=>r.status)`),403,'missing CSRF must fail');
-  await click('#tab-accounts');await wait(`!document.getElementById('accounts-panel').hidden`);await capture('accounts-desktop',1505,1045);
+  await click('#tab-devices');await click('#language');await capture('devices-mobile-zh',390,844,true);await click('#language');
+  await click('#tab-accounts');await wait(`!document.getElementById('accounts-panel').hidden`);await capture('accounts-desktop',1440,1045);
   await click('#account-rows tr:first-child button');await wait(`document.getElementById('revoke-dialog').open`);
   await command('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});await command('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});
   assert.ok(await evaluate(`document.activeElement.closest('dialog')?.id==='revoke-dialog'`),'dialog traps focus');
   await command('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});await command('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});await wait(`!document.getElementById('revoke-dialog').open`);
   assert.equal((await rest('/api/state',{headers:{Authorization:bearer(ids[1])}})).status,200,'cancel does not revoke');
-  await click('#account-rows tr:first-child button');await capture('revoke-dialog',1505,1045);await submit('revoke-form');await wait(`!document.getElementById('revoke-dialog').open && document.getElementById('account-rows').children.length===2`);
+  await click('#account-rows tr:first-child button');await capture('revoke-dialog',1440,1045);await submit('revoke-form');await wait(`!document.getElementById('revoke-dialog').open && document.getElementById('account-rows').children.length===2`);
   for(const id of ids.slice(0,2))assert.equal((await rest('/api/state',{headers:{Authorization:bearer(id)}})).status,401);
-  for(const id of ids.slice(2))assert.equal((await rest('/api/state',{headers:{Authorization:bearer(id)}})).status,200);
+  for(const id of ids.slice(2))assert.equal((await rest(`/api/devices/${id}/sync-direction`,{headers:{Authorization:bearer(id)}})).status,200);
   assert.equal((await rest('/api/devices',{method:'POST',headers:{Authorization:auth('shared-device',devicePassword)},body:{deviceId:ids[0],deviceToken:token}})).status,401);
   await click('#logout');await wait(`!document.getElementById('login-panel').hidden && document.getElementById('workspace').hidden`);
   assert.equal(await evaluate(`fetch('/api/admin/devices').then(r=>r.status)`),401);
   assert.equal(await evaluate(`document.getElementById('device-rows').children.length`),0);
+  assert.equal(await evaluate(`document.getElementById('sync-metrics').children.length`),0);
+  assert.equal(await evaluate(`document.getElementById('backfill-window').value`),'');
+  assert.equal(await evaluate(`document.getElementById('sync-settings-audit').textContent`),'');
   // An old request's delayed 401 must not sign out a newer valid session.
   await fill('password',password);await submit('login-form');await wait(`!document.getElementById('workspace').hidden && document.getElementById('device-rows').children.length===2`);
   holdNextDeviceRequest=true;await click('#refresh');await until(()=>!!heldDeviceResponse,'old-session request held by fixture');
@@ -122,7 +152,7 @@ try {
   assert.equal(await evaluate(`fetch('/api/admin/session').then(r=>r.status)`),200);
   await click('#logout');await wait(`!document.getElementById('login-panel').hidden`);
   assert.deepEqual(exceptions,[],'no browser runtime exceptions');assert.deepEqual(remoteRequests,[],'no external asset requests');
-  console.log('PASS: HTTPS admin login, multi-device account, presence, labels/XSS, CSRF, cookie flags, keyboard dialogs, account revocation, client isolation, logout and session replacement race');
+  console.log('PASS: HTTPS admin login, multi-device account, presence, read-only sync diagnostics, three tabs/keyboard, dirty settings, GitHub link, labels/XSS, CSRF, cookie flags, keyboard dialogs, account revocation, client isolation, logout and session replacement race');
   console.log('Screenshots:',screenshots);
 } finally {
   if(ws)ws.close();

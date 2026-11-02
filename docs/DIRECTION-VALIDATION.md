@@ -8,7 +8,7 @@ rollout. Existing installed clients require the previous server release.
 
 - `cargo fmt --all --check`
 - `cargo clippy --locked --all-targets --all-features -- -D warnings`
-- `cargo test --locked --all-features`: 44 passing tests.
+- `cargo test --locked --all-features`: 46 passing tests.
 - New regression tests were observed failing in disposable copies with behavior
   disabled or assertions inverted, then restored. Actual pre-fix failures also
   reproduced ACK-lost fallback, delayed/paused ACKs, promoted-candidate expiry,
@@ -60,3 +60,36 @@ that broader-suite failure is not reported as a successful full-suite run.
 
 Counters measure routing decisions (backfills selected), not proof that a user
 read a clipboard. Only a client ACK confirms its reported handling outcome.
+
+## Administration update — 2026-11-02
+
+The admin page now has Devices / Accounts / Settings tabs and a safe GitHub
+project link. Device rows project effective direction, pause, report lifecycle
+and data lease using one LEFT JOIN; this does not alter client data routes.
+
+- The new read-only projection test was observed failing against the old server
+  (missing `sync.reportState`), then passing for unknown, three directions,
+  pause, revoked, expired before/after cleanup, and inactive lease. Repeated
+  reads leave device metadata, TTL and acknowledgment unchanged; no session or
+  secret payload is returned. Device Basic/Bearer credentials cannot read
+  administrative devices or settings.
+- 46 Rust tests and strict all-target/all-feature Clippy pass. The existing
+  direction routing and credential tests remain enabled.
+- Disposable Chromium over HTTPS verifies the three tabs, keyboard navigation,
+  settings-only form, dirty-input preservation across refresh/tab changes,
+  settings audit, expanded details, literal XSS labels, isolated client/admin
+  credentials, CSRF, cookie flags, logout clearing and delayed-session handling.
+  The fixture's old-server run failed at the missing GitHub link before the
+  updated server was built. A paused fixture correctly rejected data access;
+  account survival is checked through its direction control endpoint instead.
+- Existing layout was the visual baseline (1505×1045). The implemented desktop
+  (1440×1045) and mobile (390×844), English/Chinese, light/dark fixture screens
+  were captured under `target/admin-ui/`. No external asset requests or browser
+  runtime exceptions occurred. No pixel-perfect claim is made.
+- The current shared-core HTTPS probe also passes both real WSS and forced
+  HTTP fallback, including latest-only delivery, sensitive policy, restart,
+  idempotency and conflicts. No new client protocol or telemetry is introduced.
+
+This section records the admin update separately from the original protocol
+fixture validation and its historical practical limits above. Local container
+rollout and installed-client checks are recorded in the deployment handoff.

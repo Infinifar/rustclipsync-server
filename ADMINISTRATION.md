@@ -50,6 +50,18 @@ Device labels are administrator-written metadata, not device-reported identity. 
 
 The page refreshes metadata every 15 seconds while visible. Background refresh does not extend the session's idle timeout; user interaction sends a throttled authenticated keepalive. Hiding the page stops refresh work until it is visible again.
 
+## Sync state and settings
+
+The page defaults to English, with a Chinese language switch. Use **Devices**, **Accounts** and **Settings** to navigate. The GitHub header link opens the server repository in a new tab with `noopener noreferrer`; it loads no external assets and sends no referrer.
+
+**Devices** shows send-only, receive-only or bidirectional sync, with pause displayed separately. Report state is **Accepted by server**, **Direction not reported**, **Direction revoked** or **Direction expired**. Unknown/revoked/expired directions receive nothing. Acceptance means the server stored the report, not that the client received its ACK. Expand **Sync details** for the last direction operation time/source/version, activity expiry and current data lease. The last report source is not the current connection transport. A direction expires after 30 days without activity; this is separate from token revocation. The 30-second data lease is also distinct from the 60-second activity badge. Acknowledged revisions include skipped messages and do not prove the clipboard was written. Reading this list does not refresh activity, TTL, direction version or acknowledgment cursor.
+
+These fields are additive, administrator-only metadata from `GET /api/admin/devices` under `sync`: `direction`, `paused`, `reportState` (`reported`, `unknown`, `revoked`, `expired`), `reportedAt`, `expiresAt`, `lastReportSource` (`ws`, `http`, or null), `version` and `dataLeaseActive`. They expose no session ID, token or clipboard body. The page does not remotely change client direction or sensitive-content policy.
+
+**Settings → Reconnect backfill** controls the global `sync.reconnect.backfill.window`, initially **5 minutes**, range **0–1440**. Saving applies immediately without restarting. Nonzero changes affect newly stored candidates; existing records retain their write-time expiry. **0** disables offline storage/replay and clears pending offline candidates, including promoted backfill, while current-session live delivery continues. Only the administrator can save; the actor, time and old/new values are audited. Invalid input is rejected, and corrupt runtime configuration falls back to 0 with an explicit warning. Tab changes and refresh preserve unsaved input; logout clears private settings and diagnostics.
+
+Below the setting, **Server diagnostics** displays report/error/source, filtering, unknown-state, revocation, expiry, backfill and configuration-alert counters from `GET /api/admin/sync-settings`. They reset with the server process, unlike the persisted setting and audit. Backfills count selected candidates, not completed clipboard writes. The troubleshooting list checks protocol, direction/pause/report/lease, offline expiry, then local filters. Sensitive text may remain in a client's inbox without writing the system clipboard.
+
 ## Browser security
 
 - Only the independent administrator can log in. Login requires an exact allowed Origin, JSON and a custom request header, preventing form-based login CSRF. No cross-origin CORS access is enabled.
