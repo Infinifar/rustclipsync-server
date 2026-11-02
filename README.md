@@ -103,6 +103,16 @@ An optional, responsive [administration page](ADMINISTRATION.md) at `/admin/` ha
 
 The unique administrator has separate `RCS_ADMIN_USER` and `RCS_ADMIN_PASSWORD` credentials read from the local `.env`; the administrator can also pair sync clients. Existing `RCS_USER` credentials and issued device tokens remain valid for synchronization. With an independent administrator configured, the old sync account no longer grants device-management access. Device accounts cannot administer the server. The web page is disabled by default; follow the [setup and security guide](ADMINISTRATION.md) to use `docker-compose.admin.yml` and configure an HTTPS origin. No separate administrator password file is needed. It uses short-lived HttpOnly sessions, CSRF protection, bounded password authentication and Argon2id account password hashes. Schema additions preserve existing device credentials; using them requires a protocol-3 client.
 
+### Web interface
+
+**Devices — synchronization direction, pause state and recent activity**
+
+![Devices page showing synchronization direction, pause state and online activity](docs/screenshots/admin-devices.png)
+
+**About — server version, update checks and routing diagnostics**
+
+![About page showing the server version, protocol version and routing diagnostics](docs/screenshots/admin-about.png)
+
 ## Direction filtering and reconnect backfill
 
 This release requires **client protocol 3**. Older clients are rejected with HTTP 426 (`PROTOCOL_UNSUPPORTED`); use the previous server release with old clients. `/api/` remains the route prefix. Upgrade the server and compatible clients as a set. Pin `v2.0.0` when retaining clients that do not implement protocol 3.
