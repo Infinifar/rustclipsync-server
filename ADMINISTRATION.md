@@ -4,7 +4,7 @@ The optional `/admin/` page manages access to one shared clipboard. It does not 
 
 ## Enable with Docker Compose
 
-Keep the existing `docker-compose.yml` and `password.secret` for client authentication. Set the independent administrator credentials and public origin in the local `.env` file (choose an administrator name different from `RCS_USER` and any existing device account):
+The single `docker-compose.yml` includes browser administration and enables it by default. Keep `password.secret` for client authentication. Alongside the existing sync/database settings, set the independent administrator credentials and public origin in the local `.env` file (choose an administrator name different from `RCS_USER` and any existing device account):
 
 ```dotenv
 RCS_ADMIN_USER=administrator
@@ -16,14 +16,18 @@ Use a unique password of at least 12 bytes. Single-quote the password in `.env` 
 
 ```bash
 chmod 0600 .env
-docker compose -f docker-compose.yml -f docker-compose.admin.yml up -d
+docker compose up -d
 ```
 
 Open `https://sync.example.com/admin/`. Forward `/admin/`, `/api/admin/` and the existing public/API paths through the HTTPS proxy. The proxy must preserve the original `Host` header. The backend remains published only on `127.0.0.1:8090`; no additional public port is needed. Cloudflare must not cache the management paths; responses carry `Cache-Control: no-store`.
 
 `RCS_WEB_ORIGIN` is one exact HTTPS origin, including a non-default port if used, without a URL path, credentials, query or fragment. Alternate hosts are deliberately rejected for administration. The backend does not trust `X-Forwarded-Host`, `X-Forwarded-For` or `CF-Connecting-IP` to grant access or bypass rate limits. TLS terminates at the trusted proxy/tunnel; never publish the backend's plain HTTP port to untrusted networks.
 
-Without the overlay, web administration is disabled. To disable it again, recreate the container with the base compose file only. Stored device accounts and registered devices remain valid.
+To disable the browser page, set `RCS_WEB_ENABLED=false` in `.env` and run `docker compose up -d`. Keep the required origin and administrator settings in `.env`; the independent administrator remains configured for native device management and pairing. Stored device accounts, registered devices and synchronization remain valid.
+
+### Migrating an existing Compose deployment
+
+Back up the data and configuration, then replace `docker-compose.yml` with the merged template. Preserve the existing `.env`, `password.secret` and database key, and add any missing administrator/origin values. Remove `docker-compose.admin.yml` from explicit `-f` arguments, `COMPOSE_FILE` or the 1Panel Compose configuration; the overlay has been removed from this repository. Run `docker compose up -d` with the single file. No data-volume change, credential reset or device re-pairing is required by this configuration merge.
 
 ## Accounts and permissions
 
@@ -76,7 +80,7 @@ These fields are additive, administrator-only metadata from `GET /api/admin/devi
 
 ## Configuration outside Docker
 
-`RCS_WEB_ENABLED` defaults to `false`. Enable with `true` and supply `RCS_WEB_ORIGIN`, `RCS_ADMIN_USER` and `RCS_ADMIN_PASSWORD` in the process environment. Compose reads these values from the local `.env`; when running the binary directly, export them through your service manager. No separate administrator password file is needed. Environment variables can be inspected by process/container administrators; never commit `.env` or publish resolved Compose output. Remove any old `RCS_ADMIN_PASSWORD_FILE` setting when migrating an existing deployment. Administrator credentials can also be configured with the web page disabled, for native device management and pairing clients as the administrator. They must not collide with an existing managed device username or the existing sync username.
+The binary's `RCS_WEB_ENABLED` default remains `false`; the supplied Compose template explicitly defaults it to `true`. When running the binary directly, enable it with `true` and supply `RCS_WEB_ORIGIN`, `RCS_ADMIN_USER` and `RCS_ADMIN_PASSWORD` through your service manager. Compose reads these values from the local `.env`. No separate administrator password file is needed. Environment variables can be inspected by process/container administrators; never commit `.env` or publish resolved Compose output. Remove any old `RCS_ADMIN_PASSWORD_FILE` setting when migrating an existing deployment. Administrator credentials can also be configured with the web page disabled, for native device management and pairing clients as the administrator. They must not collide with an existing managed device username or the existing sync username.
 
 Schema additions are automatic when opening the database and preserve existing token hashes, epoch, cursors and current clipboard. Back up the complete database and key before upgrading, as with any schema change. Enabling the management page itself does not require re-pairing. Protocol-3 client migration is a separate coordinated upgrade; see PROTOCOL.md.
 

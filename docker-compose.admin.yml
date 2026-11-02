@@ -1,8 +1,0 @@
-# Optional browser administration, layered over docker-compose.yml.
-services:
-  rustclipsync:
-    environment:
-      RCS_WEB_ENABLED: "true"
-      RCS_WEB_ORIGIN: ${RCS_WEB_ORIGIN:?set RCS_WEB_ORIGIN to the public HTTPS origin}
-      RCS_ADMIN_USER: ${RCS_ADMIN_USER:?set RCS_ADMIN_USER distinct from RCS_USER}
-      RCS_ADMIN_PASSWORD: ${RCS_ADMIN_PASSWORD:?set RCS_ADMIN_PASSWORD to a unique strong password}

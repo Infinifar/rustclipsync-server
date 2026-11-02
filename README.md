@@ -45,7 +45,7 @@ These projects have not undergone a controlled comparative performance or securi
 
 ## Docker Compose deployment
 
-Docker Compose and an HTTPS reverse proxy or Cloudflare Tunnel are required. This `docker-compose.yml` uses `latest`. Back up data before upgrading, then run `docker compose pull` and `docker compose up -d`. To pin a release, change the tag to `v3.0.0`. The container port is published only on host loopback `127.0.0.1:8090`:
+Docker Compose and an HTTPS reverse proxy or Cloudflare Tunnel are required. The single `docker-compose.yml` includes synchronization and browser administration, using the `latest` image. Back up data and fill in the administrator/origin settings below before upgrading, then run `docker compose pull` and `docker compose up -d`. To pin a release, change the tag to `v3.0.0`. The container port is published only on host loopback `127.0.0.1:8090`:
 
 ```yaml
 services:
@@ -59,6 +59,10 @@ services:
       RCS_PASSWORD_FILE: /run/secrets/rcs_password
       RCS_DB_KEY: ${RCS_DB_KEY:?set RCS_DB_KEY to 64 hexadecimal characters}
       RCS_HISTORY_RETENTION_DAYS: ${RCS_HISTORY_RETENTION_DAYS:-7}
+      RCS_WEB_ENABLED: ${RCS_WEB_ENABLED:-true}
+      RCS_WEB_ORIGIN: ${RCS_WEB_ORIGIN:?set RCS_WEB_ORIGIN to the public HTTPS origin}
+      RCS_ADMIN_USER: ${RCS_ADMIN_USER:?set RCS_ADMIN_USER distinct from RCS_USER}
+      RCS_ADMIN_PASSWORD: ${RCS_ADMIN_PASSWORD:?set RCS_ADMIN_PASSWORD to a unique strong password}
     secrets:
       - rcs_password
     volumes:
@@ -75,12 +79,15 @@ volumes:
     name: rustclipsync_data
 ```
 
-In the same directory, create configuration, replace the username and enter a random password of at least 12 bytes when prompted:
+For a new deployment, create configuration in the same directory. Replace `your-user` and `https://sync.example.com` with your sync username and public HTTPS origin. Choose an administrator name different from the sync username and existing device accounts; the commands generate its password into `.env`. Enter a random sync password of at least 12 bytes when prompted:
 
 ```sh
 umask 077
 printf 'RCS_USER=%s\n' 'your-user' > .env
 printf 'RCS_DB_KEY=%s\n' "$(openssl rand -hex 32)" >> .env
+printf 'RCS_WEB_ORIGIN=%s\n' 'https://sync.example.com' >> .env
+printf 'RCS_ADMIN_USER=%s\n' 'administrator' >> .env
+printf 'RCS_ADMIN_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
 read -rs -p 'Password: ' rcs_password; printf '\n'
 printf '%s' "$rcs_password" > password.secret
 unset rcs_password
@@ -91,9 +98,11 @@ docker compose ps
 curl http://127.0.0.1:8090/healthz
 ```
 
-`RCS_DB_KEY` in `.env` is a 64-character hexadecimal representation of a 32-byte key. Back it up securely: the database cannot be recovered without it. Docker administrators can read container environment variables. Changing the key alone does not re-encrypt the database. The account password registers and manages devices; synchronization uses individual device tokens. Do not commit `.env`, the password file or backups.
+For an existing deployment, retain `.env`, `password.secret` and the database key; add any missing `RCS_WEB_ORIGIN`, `RCS_ADMIN_USER` and `RCS_ADMIN_PASSWORD` settings without regenerating existing credentials. Read the generated administrator password locally from `.env` to sign in. If setting your own password, use at least 12 bytes and single-quote it in `.env` to preserve literal `$` characters. No administrator password file is needed. Protect `.env` with `chmod 0600 .env`.
 
-Point the HTTPS proxy to `http://127.0.0.1:8090` and forward `/`, `/favicon.svg`, `/favicon.ico`, `/healthz` and `/api/`. Long polls can last 25 seconds, so configure a longer proxy timeout. Pair clients using the HTTPS root URL, username and password. HTTPS protects transport, but the server can read text while running; end-to-end encryption is not currently provided.
+`RCS_DB_KEY` in `.env` is a 64-character hexadecimal representation of a 32-byte key. Back it up securely: the database cannot be recovered without it. Docker administrators can read container environment variables. Changing the key alone does not re-encrypt the database. The sync password registers devices; synchronization uses individual device tokens, and administration uses the independent administrator credentials. Do not commit `.env`, the password file or backups.
+
+Point the HTTPS proxy to `http://127.0.0.1:8090` and forward `/`, `/admin/`, `/favicon.svg`, `/favicon.ico`, `/healthz` and `/api/`, including `/api/admin/`. Preserve the original `Host` header and use the exact HTTPS origin configured in `RCS_WEB_ORIGIN`, without a path. Open `https://sync.example.com/admin/` to manage devices. Long polls can last 25 seconds, so configure a longer proxy timeout. Pair clients using the HTTPS root URL, username and password. HTTPS protects transport, but the server can read text while running; end-to-end encryption is not currently provided.
 
 History is retained for seven days by default. Set `RCS_HISTORY_RETENTION_DAYS` in `.env` to 1–3650 and recreate the container to change it. Current text is always retained; message IDs and cancellation receipts are kept for at least 30 days. Cleanup is not secure erasure.
 
@@ -101,7 +110,7 @@ History is retained for seven days by default. Set `RCS_HISTORY_RETENTION_DAYS` 
 
 An optional, responsive [administration page](ADMINISTRATION.md) at `/admin/` has **Devices**, **Accounts**, **Settings** and **About** tabs. View each device's send/receive direction, pause state, accepted/unknown/revoked/expired report and recent activity. Expand sync details for report time/source/version, activity expiry, data lease and acknowledged revision. Label devices, create sync-only accounts shared by several devices, or revoke one device or an entire account. All accounts share one clipboard. Online means authenticated activity within 60 seconds; an accepted direction or active lease does not prove a client wrote its system clipboard. Metadata reads do not refresh device activity or direction TTL. The About tab contains server version, routing diagnostics and receive troubleshooting. Its manual update check queries public GitHub releases without sending credentials; it never updates the container automatically. The header links to this GitHub project, including before sign-in.
 
-The unique administrator has separate `RCS_ADMIN_USER` and `RCS_ADMIN_PASSWORD` credentials read from the local `.env`; the administrator can also pair sync clients. Existing `RCS_USER` credentials and issued device tokens remain valid for synchronization. With an independent administrator configured, the old sync account no longer grants device-management access. Device accounts cannot administer the server. The web page is disabled by default; follow the [setup and security guide](ADMINISTRATION.md) to use `docker-compose.admin.yml` and configure an HTTPS origin. No separate administrator password file is needed. It uses short-lived HttpOnly sessions, CSRF protection, bounded password authentication and Argon2id account password hashes. Schema additions preserve existing device credentials; using them requires a protocol-3 client.
+The unique administrator has separate `RCS_ADMIN_USER` and `RCS_ADMIN_PASSWORD` credentials read from the local `.env`; the administrator can also pair sync clients. Existing `RCS_USER` credentials and issued device tokens remain valid for synchronization. With an independent administrator configured, the old sync account no longer grants device-management access. Device accounts cannot administer the server. The single Compose file enables the page by default. To disable it, set `RCS_WEB_ENABLED=false` in `.env` and run `docker compose up -d`; keep the origin and administrator settings. Accounts, device tokens and synchronization remain available. See the [setup and security guide](ADMINISTRATION.md) for proxy configuration and migration. No separate administrator password file is needed. It uses short-lived HttpOnly sessions, CSRF protection, bounded password authentication and Argon2id account password hashes. Schema additions preserve existing device credentials; using them requires a protocol-3 client.
 
 ### Web interface
 

@@ -42,7 +42,7 @@ RustClipSync 是面向个人设备的轻量 Rust 文本剪贴板同步服务，�
 
 ## Docker Compose 部署
 
-需要 Docker Compose、可用的 HTTPS 反向代理或 Cloudflare Tunnel。下面的 `docker-compose.yml` 使用 `latest` 镜像；升级时先备份数据，再执行 `docker compose pull` 和 `docker compose up -d`。如需固定版本，可将标签改为 `v3.0.0`。容器仅在宿主机 `127.0.0.1:8090` 开放端口：
+需要 Docker Compose、可用的 HTTPS 反向代理或 Cloudflare Tunnel。单个 `docker-compose.yml` 已包含同步服务和 Web 管理配置，使用 `latest` 镜像；升级时先备份数据、补齐下述管理员和 Origin 设置，再执行 `docker compose pull` 和 `docker compose up -d`。如需固定版本，可将标签改为 `v3.0.0`。容器仅在宿主机 `127.0.0.1:8090` 开放端口：
 
 ```yaml
 services:
@@ -56,6 +56,10 @@ services:
       RCS_PASSWORD_FILE: /run/secrets/rcs_password
       RCS_DB_KEY: ${RCS_DB_KEY:?set RCS_DB_KEY to 64 hexadecimal characters}
       RCS_HISTORY_RETENTION_DAYS: ${RCS_HISTORY_RETENTION_DAYS:-7}
+      RCS_WEB_ENABLED: ${RCS_WEB_ENABLED:-true}
+      RCS_WEB_ORIGIN: ${RCS_WEB_ORIGIN:?set RCS_WEB_ORIGIN to the public HTTPS origin}
+      RCS_ADMIN_USER: ${RCS_ADMIN_USER:?set RCS_ADMIN_USER distinct from RCS_USER}
+      RCS_ADMIN_PASSWORD: ${RCS_ADMIN_PASSWORD:?set RCS_ADMIN_PASSWORD to a unique strong password}
     secrets:
       - rcs_password
     volumes:
@@ -72,12 +76,15 @@ volumes:
     name: rustclipsync_data
 ```
 
-在文件所在目录创建配置，替换账户名并交互输入至少 12 字节的随机密码：
+首次部署时，在文件所在目录创建配置，将 `your-user` 和 `https://sync.example.com` 替换为同步账户名和公开 HTTPS Origin。管理员名称须与同步账户及已有设备账户不同；下面的命令将管理员随机密码直接写入 `.env`，并交互读取至少 12 字节的随机同步密码：
 
 ```sh
 umask 077
 printf 'RCS_USER=%s\n' 'your-user' > .env
 printf 'RCS_DB_KEY=%s\n' "$(openssl rand -hex 32)" >> .env
+printf 'RCS_WEB_ORIGIN=%s\n' 'https://sync.example.com' >> .env
+printf 'RCS_ADMIN_USER=%s\n' 'administrator' >> .env
+printf 'RCS_ADMIN_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
 read -rs -p 'Password: ' rcs_password; printf '\n'
 printf '%s' "$rcs_password" > password.secret
 unset rcs_password
@@ -88,9 +95,11 @@ docker compose ps
 curl http://127.0.0.1:8090/healthz
 ```
 
-`.env` 中的 `RCS_DB_KEY` 是 32 字节密钥的 64 位十六进制表示，必须妥善备份；丢失后无法恢复数据库。Docker 管理员可读取容器环境变量。单独更改密钥不会重新加密数据库。账号密码用于登记和管理设备，同步使用独立设备令牌。不要将 `.env`、密码文件或备份提交到仓库。
+已有部署应保留 `.env`、`password.secret` 和数据库密钥，仅补齐缺失的 `RCS_WEB_ORIGIN`、`RCS_ADMIN_USER`、`RCS_ADMIN_PASSWORD`，不要重新生成已有凭据。登录时在本地查看 `.env` 中生成的管理员密码；如自定义密码，须至少 12 字节，并在 `.env` 中使用单引号包裹，保留字面量 `$`。无需管理员密码文件；使用 `chmod 0600 .env` 保护配置。
 
-将 HTTPS 代理指向 `http://127.0.0.1:8090`，转发 `/`、`/favicon.svg`、`/favicon.ico`、`/healthz` 和 `/api/`；长轮询最长 25 秒，代理超时应更长。客户端填写 HTTPS 根地址、账户和密码进行配对。HTTPS 保护传输，但服务端运行时可读取正文；当前不提供端到端加密。
+`.env` 中的 `RCS_DB_KEY` 是 32 字节密钥的 64 位十六进制表示，必须妥善备份；丢失后无法恢复数据库。Docker 管理员可读取容器环境变量。单独更改密钥不会重新加密数据库。同步密码用于登记设备，同步使用设备独立令牌，管理使用独立管理员凭据。不要将 `.env`、密码文件或备份提交到仓库。
+
+将 HTTPS 代理指向 `http://127.0.0.1:8090`，转发 `/`、`/admin/`、`/favicon.svg`、`/favicon.ico`、`/healthz` 和 `/api/`（包括 `/api/admin/`）；保留原始 `Host` 头，并使用 `RCS_WEB_ORIGIN` 配置的精确 HTTPS Origin，不包含路径。管理页面为 `https://sync.example.com/admin/`。长轮询最长 25 秒，代理超时应更长。客户端填写 HTTPS 根地址、账户和密码进行配对。HTTPS 保护传输，但服务端运行时可读取正文；当前不提供端到端加密。
 
 历史默认保留 7 天；可在 `.env` 中设置 `RCS_HISTORY_RETENTION_DAYS` 为 1–3650 天，并重新创建容器。当前文本始终保留，消息 ID 和取消回执至少保留 30 天；清理不等于安全擦除。
 
@@ -98,7 +107,7 @@ curl http://127.0.0.1:8090/healthz
 
 可选的[设备管理页面](ADMINISTRATION.md)位于 `/admin/`，支持手机和桌面访问，分为**设备、账户、设置、关于**四个页签。设备页显示同步方向、暂停、方向上报状态（已接受／未知／已撤销／已过期）和近期活动；展开详情可查看上报时间、方式、版本、活动有效期、数据租约及最后确认修订号。支持设备备注、创建多设备共用的同步账户，以及撤销单台设备或整个账户。所有账户共享同一份剪贴板。“在线”表示近 60 秒内有认证活动；方向已接受、租约有效都不代表客户端已写入系统剪贴板。管理页读取不会延长设备活动或方向 TTL。“关于”页显示服务端版本、分发诊断和接收排障说明；手动检查 GitHub 正式版本时不发送凭据，不会自动更新容器。页头提供 GitHub 项目入口，登录前后均可访问。
 
-唯一管理员通过本地 `.env` 中独立的 `RCS_ADMIN_USER` 和 `RCS_ADMIN_PASSWORD` 配置，也可以使用该账户配对同步客户端，无需单独的管理员密码文件。现有 `RCS_USER` 凭据和已登记的设备令牌继续用于同步；配置独立管理员后，旧同步账户不再具有设备管理权限。设备账户只能同步，不能管理服务端。网页默认关闭；启用方法见[配置与安全说明](ADMINISTRATION.md)：使用 `docker-compose.admin.yml` 并配置 HTTPS Origin。浏览器使用短时 HttpOnly 会话、CSRF 防护和有界认证限速，设备账户密码以 Argon2id 散列保存。数据库自动增加字段，保留设备身份凭据，但使用它们的客户端必须适配协议 3。
+唯一管理员通过本地 `.env` 中独立的 `RCS_ADMIN_USER` 和 `RCS_ADMIN_PASSWORD` 配置，也可以使用该账户配对同步客户端，无需单独的管理员密码文件。现有 `RCS_USER` 凭据和已登记的设备令牌继续用于同步；配置独立管理员后，旧同步账户不再具有设备管理权限。设备账户只能同步，不能管理服务端。统一 Compose 默认启用网页；如需关闭，在 `.env` 设置 `RCS_WEB_ENABLED=false` 后运行 `docker compose up -d`，保留 Origin 和管理员配置，账户、设备令牌与同步功能仍可使用。代理配置及旧部署迁移见[配置与安全说明](ADMINISTRATION.md)。浏览器使用短时 HttpOnly 会话、CSRF 防护和有界认证限速，设备账户密码以 Argon2id 散列保存。数据库自动增加字段，保留设备身份凭据，但使用它们的客户端必须适配协议 3。
 
 ### 管理页面预览
 
