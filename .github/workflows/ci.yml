@@ -22,7 +22,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: Infinifar/rustclipsync-core
-          ref: 9d80fac36170216436bd6e14db019c12e7dc4817
+          ref: 6a1ccd37b8ca3e515610d48bfa47f20b7c9b0ca4
           path: .ci/rustclipsync-core
           persist-credentials: false
       - name: Verify server and shared core over HTTPS

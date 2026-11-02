@@ -1,6 +1,6 @@
 # RustClipSync Server
 
-当前接口统一为 `/api/...`。服务端、各客户端及按路径过滤的反向代理需要配套更新；设备令牌、游标和加密数据保持不变。
+当前版本 **3.0.0**，要求**协议 3**（`/api/...`）。请配套升级兼容客户端；已有设备令牌、游标和加密数据继续保存。见[发布说明](releases/v3.0.0.md)。
 
 [English](README.md) · 简体中文
 
@@ -12,9 +12,20 @@ RustClipSync 是面向个人设备的轻量 Rust 文本剪贴板同步服务，�
 - Omarchy：[Omaclipsync 插件](https://github.com/Infinifar/omaclipsync)。
 - Windows 与 Linux：[RustClipSync Desktop](https://github.com/Infinifar/rustclipsync-desktop)，Windows 11 使用 WinUI 3，Linux 使用独立的 Qt 6/QML 界面，支持后台同步、加密历史和敏感收件区。Linux 提供面向 Debian 12、Ubuntu 24.04、Fedora 43 和 Arch/Omarchy 的 x86_64 安装包，无需 Omarchy 或 Quickshell。可从 [Release 页面](https://github.com/Infinifar/rustclipsync-desktop/releases)下载；Windows 安装包目前未签名。安装及桌面要求见 [Linux 使用说明](https://github.com/Infinifar/rustclipsync-desktop/blob/main/LINUX.md)：支持 X11，Wayland 需要 data-control 支持，缺少该协议的 GNOME/Wayland 会话暂不支持。
 - 共享客户端核心：[rustclipsync-core](https://github.com/Infinifar/rustclipsync-core)，提供 Rust 客户端的同步状态机和 HTTPS 协议实现；Windows/Linux 桌面客户端与 Omaclipsync 插件分别提供平台适配。
-- 其他客户端：[接口协议与适配说明](PROTOCOL.md)。初次登记从当前版本开始，不回放旧剪贴板；断线期间只追上最新状态，本地待发送内容与远端冲突时需用户确认。剪贴板写入与本地游标不能原子提交，异常崩溃时不保证严格恰好一次。
+- 其他客户端：[接口协议与适配说明](PROTOCOL.md)。初次登记从当前版本开始，不回放旧剪贴板；断线期间只追上最新状态，待上传冲突由客户端策略决定：Omaclipsync 0.4.0 会安全取消／跳过冲突并保留本机剪贴板，其他客户端可能需要显式选择；自动重试不会悄悄抬高被拒绝文本的基准版本。剪贴板写入与本地游标不能原子提交，异常崩溃时不保证严格恰好一次。
 
-只同步 UTF-8 文本，单条上限 10 MiB，不支持图片、文件或多账户。敏感文本默认不传输；只有来源应用明确标记的敏感内容才能被识别。
+### 配套正式版本
+
+| 组件 | 版本 |
+| --- | --- |
+| 服务端 | **3.0.0** |
+| Windows/Linux 桌面端 | **0.5.0** |
+| Omaclipsync | **0.4.0** |
+| Rust 共享 core | **0.4.0** |
+
+移动端与 Fcitx 输入法单独发布，本批不合并或发布这些项目。切换共享服务端前，请确认已安装构建支持协议 3；否则固定服务端 **v2.0.0**。3.0.0 会明确拒绝旧客户端，不会回退到旧广播行为。
+
+只同步 UTF-8 文本，单条上限 10 MiB，不支持图片、文件或按用户隔离的剪贴板。唯一管理员可管理多个同步账户，它们共享同一份剪贴板。敏感文本默认不传输；只有来源应用明确标记的敏感内容才能被识别。
 
 ## 与 SyncClipboard 的关系
 
@@ -27,11 +38,11 @@ RustClipSync 是面向个人设备的轻量 Rust 文本剪贴板同步服务，�
 | 隐私 | HTTPS 传输、SQLCipher 数据库加密、设备独立令牌可撤销；敏感标记默认不传输 | 支持自行部署及多种后端；安全和数据保护取决于部署及客户端配置 |
 | 取舍 | 功能和兼容客户端较少；服务端可读取正文，尚无端到端加密 | 平台和功能覆盖更广；资源使用及安全能力应以实际版本和部署为准 |
 
-没有对两者进行同条件性能或安全审计，不据此宣称绝对优势。一次本机回环测试中，服务端空闲 RSS 约 9.4 MiB；5 分钟合成负载中 RSS 约从 9.45 增至 11.74 MiB、无请求错误。这些数值不代表公网、所有负载或长期运行结果。
+没有对两者进行同条件性能或安全审计，不据此宣称绝对优势。较早版本的一次本机回环基线测试中（并非协议 3 新版本基准），服务端空闲 RSS 约 9.4 MiB；5 分钟合成负载中 RSS 约从 9.45 增至 11.74 MiB、无请求错误。这些数值不代表公网、所有负载或长期运行结果。
 
 ## Docker Compose 部署
 
-需要 Docker Compose、可用的 HTTPS 反向代理或 Cloudflare Tunnel。下面的 `docker-compose.yml` 使用 `latest` 镜像；升级时先备份数据，再执行 `docker compose pull` 和 `docker compose up -d`。如需固定版本，可将标签改为 `v2.0.0`。容器仅在宿主机 `127.0.0.1:8090` 开放端口：
+需要 Docker Compose、可用的 HTTPS 反向代理或 Cloudflare Tunnel。下面的 `docker-compose.yml` 使用 `latest` 镜像；升级时先备份数据，再执行 `docker compose pull` 和 `docker compose up -d`。如需固定版本，可将标签改为 `v3.0.0`。容器仅在宿主机 `127.0.0.1:8090` 开放端口：
 
 ```yaml
 services:
@@ -91,7 +102,7 @@ curl http://127.0.0.1:8090/healthz
 
 ## 按方向分发与重连补发
 
-本版本要求**客户端协议 3**。旧客户端会收到 HTTP 426（`PROTOCOL_UNSUPPORTED`），请搭配旧版服务端使用；接口前缀仍为 `/api/`。core、服务端和客户端应成套升级，开发分支不会自动替换生产服务。
+本版本要求**客户端协议 3**。旧客户端会收到 HTTP 426（`PROTOCOL_UNSUPPORTED`），请搭配旧版服务端使用；接口前缀仍为 `/api/`。服务端与兼容客户端应成套升级；仍使用不支持协议 3 的客户端时请固定服务端 `v2.0.0`。
 
 | 客户端状态 | 上传 | 接收 |
 | --- | --- | --- |

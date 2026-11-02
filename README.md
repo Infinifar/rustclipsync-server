@@ -1,6 +1,6 @@
 # RustClipSync Server
 
-This release uses only `/api/...`. Update the clients and any path-filtering reverse proxy together with the server; device tokens, cursors and encrypted data remain unchanged.
+Version **3.0.0** requires **wire protocol 3** at `/api/...`. Upgrade compatible clients together; existing device tokens, cursors and encrypted data remain stored. See the [release notes](releases/v3.0.0.md).
 
 English · [简体中文](README-ZH.md)
 
@@ -12,9 +12,23 @@ RustClipSync is a lightweight Rust text clipboard server for personal devices, d
 - Omarchy: [Omaclipsync plugin](https://github.com/Infinifar/omaclipsync).
 - Windows and Linux: [RustClipSync Desktop](https://github.com/Infinifar/rustclipsync-desktop), with a WinUI 3 interface on Windows 11 and a standalone Qt 6/QML interface on Linux, plus background synchronization, encrypted history and a sensitive inbox. Linux x86_64 packages target Debian 12, Ubuntu 24.04, Fedora 43 and Arch/Omarchy; the Linux app does not require Omarchy or Quickshell. Download from [Releases](https://github.com/Infinifar/rustclipsync-desktop/releases); Windows installers are currently unsigned. See the [Linux guide](https://github.com/Infinifar/rustclipsync-desktop/blob/main/LINUX.md) for installation and desktop requirements: X11 is supported; Wayland requires data-control support, and GNOME/Wayland sessions without it are currently unsupported.
 - Shared client library: [rustclipsync-core](https://github.com/Infinifar/rustclipsync-core) implements the Rust synchronization state machine and HTTPS protocol; RustClipSync Desktop on Windows/Linux and the Omaclipsync plugin provide their own platform adapters.
-- Other clients: see the [protocol and integration guide](PROTOCOL.md). Registration starts at the current revision without replaying old clipboard content. Offline devices catch up to the latest state, and conflicts with pending local content require user confirmation. Clipboard writes and local cursors cannot be committed atomically, so an unexpected crash cannot guarantee exactly-once effects.
+- Other clients: see the [protocol and integration guide](PROTOCOL.md). Registration starts at the current revision without replaying old clipboard content. Offline devices catch up to the latest state, and pending-upload conflicts follow client policy: Omaclipsync 0.4.0 safely cancels/skips the conflict while preserving its local clipboard; other clients may require an explicit choice. Automatic retries never silently rebase rejected text. Clipboard writes and local cursors cannot be committed atomically, so an unexpected crash cannot guarantee exactly-once effects.
 
-Only UTF-8 text is synchronized, up to 10 MiB per item. Images, files and multiple accounts are not supported. Marked sensitive text is not synchronized by default; only content marked by its source application can be recognized.
+### Compatible release set
+
+| Component | Release |
+| --- | --- |
+| Server | **3.0.0** |
+| Windows/Linux desktop | **0.5.0** |
+| Omaclipsync | **0.4.0** |
+| Shared Rust core | **0.4.0** |
+
+Mobile applications and Fcitx input methods are released separately and are not
+merged or published in this batch. Verify that the installed build implements
+protocol 3 before upgrading a shared server. Otherwise pin server **v2.0.0**;
+older clients are explicitly rejected by 3.0.0 rather than silently broadcast to.
+
+Only UTF-8 text is synchronized, up to 10 MiB per item. Images, files and separate per-user clipboards are not supported. Multiple sync accounts can be grouped under the one administrator; they share the same clipboard. Marked sensitive text is not synchronized by default; only content marked by its source application can be recognized.
 
 ## Relationship to SyncClipboard
 
@@ -27,11 +41,11 @@ An earlier implementation supported the [SyncClipboard](https://github.com/Jeric
 | Privacy | HTTPS transport, SQLCipher database encryption and revocable device tokens; marked sensitive text is excluded by default | Supports self-hosting and multiple backends; security and data protection depend on deployment and client configuration |
 | Trade-offs | Fewer features and compatible clients; server can read text and end-to-end encryption is not available | Wider feature and platform coverage; resource use and security depend on the version and deployment |
 
-These projects have not undergone a controlled comparative performance or security audit. In one local loopback test, idle server RSS was approximately 9.4 MiB; during a five-minute synthetic workload it rose from about 9.45 to 11.74 MiB with no request errors. These numbers do not represent public networks, every workload or long-running behavior.
+These projects have not undergone a controlled comparative performance or security audit. In an earlier-release loopback baseline (not a new protocol-3 benchmark), idle server RSS was approximately 9.4 MiB; during a five-minute synthetic workload it rose from about 9.45 to 11.74 MiB with no request errors. These numbers do not represent public networks, every workload or long-running behavior.
 
 ## Docker Compose deployment
 
-Docker Compose and an HTTPS reverse proxy or Cloudflare Tunnel are required. This `docker-compose.yml` uses `latest`. Back up data before upgrading, then run `docker compose pull` and `docker compose up -d`. To pin a release, change the tag to `v2.0.0`. The container port is published only on host loopback `127.0.0.1:8090`:
+Docker Compose and an HTTPS reverse proxy or Cloudflare Tunnel are required. This `docker-compose.yml` uses `latest`. Back up data before upgrading, then run `docker compose pull` and `docker compose up -d`. To pin a release, change the tag to `v3.0.0`. The container port is published only on host loopback `127.0.0.1:8090`:
 
 ```yaml
 services:
@@ -91,7 +105,7 @@ The unique administrator has separate `RCS_ADMIN_USER` and `RCS_ADMIN_PASSWORD` 
 
 ## Direction filtering and reconnect backfill
 
-This release requires **client protocol 3**. Older clients are rejected with HTTP 426 (`PROTOCOL_UNSUPPORTED`); use the previous server release with old clients. `/api/` remains the route prefix. Upgrade the core and clients together; the development branch is not an automatic production rollout.
+This release requires **client protocol 3**. Older clients are rejected with HTTP 426 (`PROTOCOL_UNSUPPORTED`); use the previous server release with old clients. `/api/` remains the route prefix. Upgrade the server and compatible clients as a set. Pin `v2.0.0` when retaining clients that do not implement protocol 3.
 
 | Client state | Upload | Receive |
 | --- | --- | --- |

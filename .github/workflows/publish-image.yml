@@ -22,8 +22,9 @@ jobs:
         with:
           images: ghcr.io/infinifar/rustclipsync-server
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || (github.ref_type == 'tag' && !contains(github.ref_name, '-')) }}
             type=ref,event=tag
+            type=semver,pattern={{version}}
             type=sha
       - uses: docker/build-push-action@v6
         with:
