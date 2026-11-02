@@ -149,6 +149,12 @@ fn session_cas_idempotency_pause_revoke_and_ttl_are_fenced() {
             .code,
         "SESSION_REVOKED"
     );
+    touch(&db, &rt, &d.id, 107).unwrap();
+    assert_eq!(
+        snapshot(&db, &d.id).unwrap().expires_at,
+        Some(107 + TTL),
+        "each valid activity refreshes the complete 30-day TTL"
+    );
     touch(&db, &rt, &d.id, 106 + TTL + 1).unwrap();
     assert!(
         snapshot(&db, &d.id).unwrap().revoked,

@@ -278,8 +278,8 @@ pub fn expire(db: &Connection, rt: &Runtime, now: i64) -> rusqlite::Result<()> {
 }
 pub fn touch(db: &Connection, rt: &Runtime, id: &str, now: i64) -> rusqlite::Result<()> {
     expire(db, rt, now)?;
-    // Throttle durable TTL refresh to once per minute, independently of reads.
-    db.execute("UPDATE rcs_direction SET expires=?2 WHERE device_id=?1 AND direction IS NOT NULL AND expires>?2-?3 AND expires<?2-60",params![id,now+TTL,TTL])?;
+    // Exact activity TTL; skip an identical timestamp without weakening expiry.
+    db.execute("UPDATE rcs_direction SET expires=?2 WHERE device_id=?1 AND direction IS NOT NULL AND expires>?3 AND expires<?2",params![id,now+TTL,now])?;
     Ok(())
 }
 #[derive(Deserialize, Serialize, Clone)]
@@ -478,8 +478,8 @@ pub fn session(
         return Err(Fault::new(StatusCode::FORBIDDEN, "DIRECTION_FORBIDDEN"));
     }
     db.execute(
-        "UPDATE rcs_direction SET lease_until=?2 WHERE device_id=?1",
-        params![device.id, now + LEASE],
+        "UPDATE rcs_direction SET lease_until=?2,expires=?3 WHERE device_id=?1 AND (lease_until<>?2 OR expires<?3)",
+        params![device.id, now + LEASE,now+TTL],
     )?;
     touch(db, rt, &device.id, now)?;
     Ok(())
