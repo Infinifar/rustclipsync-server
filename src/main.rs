@@ -22,6 +22,7 @@ mod admin;
 mod api;
 mod auth;
 mod database;
+mod direction;
 mod presence;
 
 const MAX_TEXT: usize = 10 * 1024 * 1024;
@@ -36,6 +37,7 @@ struct App {
     auth: auth::AuthState,
     web: admin::WebState,
     presence: presence::Presence,
+    direction: direction::Runtime,
 }
 type Shared = Arc<App>;
 
@@ -77,6 +79,7 @@ fn router(app: Shared) -> Router {
         .route("/favicon.ico", get(favicon_ico))
         .route("/healthz", get(health))
         .merge(api::router())
+        .merge(direction::router())
         .merge(admin::router())
         .with_state(app)
 }
@@ -165,7 +168,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         auth,
         web,
         presence: presence::Presence::default(),
+        direction: direction::Runtime::default(),
     });
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .json()
+        .with_writer(std::io::stderr)
+        .init();
     let cleanup_app = Arc::clone(&app);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(3600));
@@ -175,12 +186,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if clean_legacy_history(&db, retention_days).is_err() {
                 eprintln!("old history cleanup failed");
             }
+            if direction::expire(&db, &cleanup_app.direction, presence::unix_time()).is_err() {
+                tracing::warn!(event = "sync.expiry.cleanup_failed");
+            }
             if api::clean_history(&db, retention_days).is_err() {
                 eprintln!("history cleanup failed");
             }
         }
     });
     let listener = tokio::net::TcpListener::bind(listen).await?;
+    direction::restart(&mut *app.db.lock().await)?;
     axum::serve(listener, router(app)).await?;
     Ok(())
 }

@@ -61,7 +61,7 @@ try {
   const submit=id=>evaluate(`document.getElementById(${JSON.stringify(id)}).requestSubmit()`);
   const wait=(expression,description=expression)=>until(()=>evaluate(expression),description);
   async function capture(name,width,height,mobile=false){await command('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile});await delay(150);const {data}=await command('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});await writeFile(join(screenshots,name+'.png'),Buffer.from(data,'base64'));}
-  async function rest(path,{method='GET',headers={},body}={}){return new Promise((resolve,reject)=>{const req=https.request(origin+path,{method,rejectUnauthorized:false,headers:{...headers,...(body!==undefined?{'Content-Type':'application/json'}:{})}},res=>{const chunks=[];res.on('data',c=>chunks.push(c));res.on('end',()=>{const text=Buffer.concat(chunks).toString();let value;try{value=JSON.parse(text);}catch{value=text;}resolve({status:res.statusCode,value});});});req.on('error',reject);req.end(body===undefined?undefined:JSON.stringify(body));});}
+  async function rest(path,{method='GET',headers={},body}={}){return new Promise((resolve,reject)=>{const req=https.request(origin+path,{method,rejectUnauthorized:false,headers:{'X-RCS-Protocol':'3',...(headers.Authorization?.startsWith('Bearer ')?{'X-RCS-Sync-Session':headers.Authorization.slice(7).split(':')[0]}:{}),...headers,...(body!==undefined?{'Content-Type':'application/json'}:{})}},res=>{const chunks=[];res.on('data',c=>chunks.push(c));res.on('end',()=>{const text=Buffer.concat(chunks).toString();let value;try{value=JSON.parse(text);}catch{value=text;}resolve({status:res.statusCode,value});});});req.on('error',reject);req.end(body===undefined?undefined:JSON.stringify(body));});}
   const auth=(user,pass)=>'Basic '+Buffer.from(`${user}:${pass}`).toString('base64');
   const ids=[1,2,3,4].map(n=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`);
   const token='ab'.repeat(32);const bearer=id=>`Bearer ${id}:${token}`;
@@ -75,18 +75,25 @@ try {
   await fill('password',password);await submit('login-form');await wait(`!document.getElementById('workspace').hidden && document.getElementById('account-rows').children.length===2`);
   await click('#create-account');await fill('account-username','shared-device');await fill('account-password',devicePassword);await submit('account-form');await wait(`!document.getElementById('account-dialog').open && document.getElementById('account-rows').children.length===3`);
   assert.equal(await evaluate(`document.getElementById('account-password').value`),'');
-  for(let i=0;i<4;i++){const user=i<2?'shared-device':i===2?'fixture':'administrator';const pass=i<2?devicePassword:i===2?'disposable-legacy-password':password;assert.equal((await rest('/api/devices',{method:'POST',headers:{Authorization:auth(user,pass)},body:{deviceId:ids[i],deviceToken:token}})).status,200);}
+  for(let i=0;i<4;i++){const user=i<2?'shared-device':i===2?'fixture':'administrator';const pass=i<2?devicePassword:i===2?'disposable-legacy-password':password;assert.equal((await rest('/api/devices',{method:'POST',headers:{Authorization:auth(user,pass)},body:{deviceId:ids[i],deviceToken:token}})).status,200);assert.equal((await rest(`/api/devices/${ids[i]}/sync-direction`,{method:'PUT',headers:{Authorization:bearer(ids[i])},body:{sessionId:ids[i],version:1,direction:'BIDIRECTIONAL',paused:false,connect:true}})).status,200);}
   assert.equal((await rest('/api/state',{headers:{Authorization:bearer(ids[0])}})).status,200);
   await click('#refresh');await wait(`document.getElementById('device-rows').children.length===4`);
   for(let i=0;i<4;i++) {await click(`#device-rows tr:nth-child(${i+1}) button`);await fill('device-label',['Workstation','Phone','Laptop','Tablet'][i]);await submit('rename-form');await wait(`!document.getElementById('rename-dialog').open && document.querySelector('#device-rows tr:nth-child(${i+1}) .device-name').textContent===${JSON.stringify(['Workstation','Phone','Laptop','Tablet'][i])}`);}
   await click('#device-rows tr:nth-child(4) button');await fill('device-label','<img src=x onerror="window.testXss=1">');await submit('rename-form');await wait(`!document.getElementById('rename-dialog').open && document.querySelector('#device-rows tr:nth-child(4) .device-name').textContent.startsWith('<img')`);
   assert.equal(await evaluate(`document.querySelectorAll('#device-rows img').length`),0);assert.equal(await evaluate(`window.testXss||0`),0);
   await click('#device-rows tr:nth-child(4) button');await fill('device-label','Tablet');await submit('rename-form');await wait(`!document.getElementById('rename-dialog').open && document.querySelector('#device-rows tr:nth-child(4) .device-name').textContent==='Tablet'`);
-  assert.equal(await evaluate(`document.querySelectorAll('#device-rows .online').length`),1);
+  assert.equal(await evaluate(`document.querySelectorAll('#device-rows .online').length`),4);
   await capture('devices-desktop',1505,1045);
   await capture('devices-mobile',390,844,true);
   assert.ok(await evaluate(`document.documentElement.scrollWidth<=window.innerWidth`),'no mobile horizontal overflow');
   await command('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'dark'}]});await capture('devices-dark',1505,1045);await command('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'light'}]});
+  assert.equal(await evaluate(`document.getElementById('backfill-window').value`),'5');
+  await fill('backfill-window','0');await submit('sync-settings-form');await wait(`document.getElementById('sync-settings-status').textContent.includes('saved') && document.getElementById('sync-settings-audit').textContent.includes('administrator')`);
+  assert.equal(await evaluate(`fetch('/api/admin/sync-settings').then(r=>r.json()).then(v=>v.backfillWindowMinutes)`),0);
+  await evaluate(`document.getElementById('sync-settings-title').scrollIntoView({block:'center'})`);await capture('settings-desktop',1505,1045);
+  await command('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});await evaluate(`document.getElementById('sync-settings-title').scrollIntoView({block:'center'})`);await capture('settings-mobile',390,844,true);
+  await evaluate(`window.scrollTo(0,0)`);
+  assert.equal(await evaluate(`fetch('/api/admin/sync-settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({backfillWindowMinutes:5})}).then(r=>r.status)`),403);
   const ax=await command('Accessibility.getFullAXTree');assert.equal(ax.nodes.filter(n=>n.role?.value==='button'&&!n.name?.value).length,0,'buttons need accessible names');
   const cookies=await command('Network.getCookies',{urls:[origin]});const cookie=cookies.cookies.find(c=>c.name==='__Host-rcs-admin');assert.ok(cookie?.httpOnly&&cookie.secure&&cookie.sameSite==='Strict');
   assert.equal(await evaluate('localStorage.length+sessionStorage.length'),0,'no credentials in web storage');

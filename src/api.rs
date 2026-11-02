@@ -71,6 +71,7 @@ pub fn init(db: &Connection) -> rusqlite::Result<()> {
         "INSERT OR IGNORE INTO v1_meta(singleton, epoch, revision) VALUES(1, ?1, 0)",
         [Uuid::new_v4().to_string()],
     )?;
+    crate::direction::init(db)?;
     Ok(())
 }
 
@@ -92,12 +93,14 @@ pub fn clean_history(db: &Connection, days: u32) -> rusqlite::Result<()> {
     db.execute(
         "UPDATE v1_messages SET body = NULL WHERE body IS NOT NULL
          AND created < unixepoch() - ?1
-         AND revision != (SELECT revision FROM v1_meta WHERE singleton = 1)",
+         AND revision != (SELECT revision FROM v1_meta WHERE singleton = 1)
+         AND revision NOT IN(SELECT revision FROM rcs_delivery UNION SELECT revision FROM rcs_backfill)",
         [i64::from(days) * 86_400],
     )?;
     db.execute(
         "DELETE FROM v1_messages WHERE created < unixepoch() - ?1
-         AND revision != (SELECT revision FROM v1_meta WHERE singleton = 1)",
+         AND revision != (SELECT revision FROM v1_meta WHERE singleton = 1)
+         AND revision NOT IN(SELECT revision FROM rcs_delivery UNION SELECT revision FROM rcs_backfill)",
         [i64::from(days.max(RECEIPT_DAYS)) * 86_400],
     )?;
     db.execute(
@@ -126,6 +129,7 @@ pub fn router() -> Router<Shared> {
                 .delete(cancel),
         )
         .route("/api/ack", post(ack).layer(DefaultBodyLimit::max(4096)))
+        .layer(axum::middleware::from_fn(crate::direction::protocol))
 }
 
 fn canonical_uuid(s: &str) -> bool {
@@ -140,12 +144,12 @@ fn hash(value: &[u8]) -> Vec<u8> {
     Sha256::digest(value).to_vec()
 }
 
-struct Device {
-    id: String,
-    token_hash: Vec<u8>,
+pub(crate) struct Device {
+    pub(crate) id: String,
+    pub(crate) token_hash: Vec<u8>,
 }
 
-fn check_device(db: &Connection, device: &Device) -> Result<(), StatusCode> {
+pub(crate) fn check_device(db: &Connection, device: &Device) -> Result<(), StatusCode> {
     let stored: Option<Vec<u8>> = db
         .query_row(
             "SELECT token_hash FROM v1_devices WHERE id = ?1",
@@ -187,17 +191,60 @@ impl FromRequestParts<Shared> for Device {
     }
 }
 
+struct DataSession;
+impl FromRequestParts<Shared> for DataSession {
+    type Rejection = crate::direction::Fault;
+    async fn from_request_parts(parts: &mut Parts, app: &Shared) -> Result<Self, Self::Rejection> {
+        let device = Device::from_request_parts(parts, app)
+            .await
+            .map_err(|s| crate::direction::Fault::new(s, "UNAUTHENTICATED"))?;
+        let sid = crate::direction::sid(&parts.headers)?;
+        let db = app.db.lock().await;
+        if parts.uri.path() == "/api/ack" {
+            crate::direction::ack_session(
+                &db,
+                &app.direction,
+                &device,
+                sid,
+                crate::presence::unix_time(),
+            )?;
+        } else {
+            crate::direction::session(
+                &db,
+                &app.direction,
+                &device,
+                sid,
+                false,
+                crate::presence::unix_time(),
+            )?;
+        }
+        Ok(Self)
+    }
+}
 // Upload capacity is reserved before reading the request body. Waiting
 // long-poll connections have a separate budget and cannot exhaust this one.
 struct UploadPermit(#[allow(dead_code)] OwnedSemaphorePermit);
 
 impl FromRequestParts<Shared> for UploadPermit {
-    type Rejection = StatusCode;
-    async fn from_request_parts(_: &mut Parts, app: &Shared) -> Result<Self, Self::Rejection> {
+    type Rejection = Response;
+    async fn from_request_parts(parts: &mut Parts, app: &Shared) -> Result<Self, Self::Rejection> {
+        let device = Device::from_request_parts(parts, app)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        let sid = crate::direction::sid(&parts.headers).map_err(IntoResponse::into_response)?;
+        crate::direction::session(
+            &*app.db.lock().await,
+            &app.direction,
+            &device,
+            sid,
+            true,
+            crate::presence::unix_time(),
+        )
+        .map_err(IntoResponse::into_response)?;
         Arc::clone(&app.uploads)
             .try_acquire_owned()
             .map(Self)
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())
     }
 }
 
@@ -292,6 +339,13 @@ async fn register(
         .map_err(db_error)?;
         current_revision
     };
+    crate::direction::touch(
+        &tx,
+        &app.direction,
+        &input.device_id,
+        crate::presence::unix_time(),
+    )
+    .map_err(db_error)?;
     tx.commit().map_err(db_error)?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
@@ -336,21 +390,56 @@ struct CurrentState {
     created_at: Option<i64>,
     size: Option<i64>,
     sensitive: Option<bool>,
+    delivery_revision: Option<i64>,
 }
 
 fn read_state(db: &Connection, device: &Device) -> Result<CurrentState, StatusCode> {
     check_device(db, device)?;
-    db.query_row(
-        "SELECT m.epoch, m.revision, d.ack_revision, e.message_id, e.device_id, e.created, length(e.body), e.sensitive
-         FROM v1_meta m JOIN v1_devices d ON d.id=?1
-         LEFT JOIN v1_messages e ON e.revision=m.revision WHERE m.singleton=1",
-        [&device.id], |r| Ok(CurrentState { epoch:r.get(0)?, revision:r.get(1)?, ack_revision:r.get(2)?,
-            message_id:r.get(3)?, source_device_id:r.get(4)?, created_at:r.get(5)?, size:r.get(6)?, sensitive:r.get(7)? }),
-    ).map_err(db_error)
+    let (epoch,revision,ack_revision):(String,i64,i64)=db.query_row("SELECT m.epoch,m.revision,d.ack_revision FROM v1_meta m JOIN v1_devices d ON d.id=?1 WHERE m.singleton=1",[&device.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(db_error)?;
+    let mut state = CurrentState {
+        epoch,
+        revision,
+        ack_revision,
+        message_id: None,
+        source_device_id: None,
+        created_at: None,
+        size: None,
+        sensitive: None,
+        delivery_revision: None,
+    };
+    if let Some((id, delivered)) = crate::direction::delivery(db, device).map_err(db_error)?
+        && let Some((source,created,size,sensitive))=db.query_row("SELECT device_id,created,length(body),sensitive FROM v1_messages WHERE message_id=?1 AND revision=?2 AND body IS NOT NULL",params![id,delivered],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,bool>(3)?))).optional().map_err(db_error)? {
+            state.message_id=Some(id);state.source_device_id=Some(source);state.created_at=Some(created);state.size=Some(size);state.sensitive=Some(sensitive);state.delivery_revision=Some(delivered);
+        }
+    Ok(state)
+}
+fn authorize_session(
+    db: &Connection,
+    app: &Shared,
+    device: &Device,
+    headers: &HeaderMap,
+    push: bool,
+) -> Result<(), crate::direction::Fault> {
+    let sid = crate::direction::sid(headers)?;
+    crate::direction::session(
+        db,
+        &app.direction,
+        device,
+        sid,
+        push,
+        crate::presence::unix_time(),
+    )
 }
 
-async fn state(State(app): State<Shared>, device: Device) -> Result<impl IntoResponse, StatusCode> {
-    let current = read_state(&*app.db.lock().await, &device)?;
+async fn state(
+    State(app): State<Shared>,
+    device: Device,
+    _: DataSession,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, crate::direction::Fault> {
+    let db = app.db.lock().await;
+    authorize_session(&db, &app, &device, &headers, false)?;
+    let current = read_state(&db, &device)?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(current)))
 }
 
@@ -364,8 +453,10 @@ struct ChangesQuery {
 async fn changes(
     State(app): State<Shared>,
     device: Device,
+    _: DataSession,
     Query(query): Query<ChangesQuery>,
-) -> Result<Response, StatusCode> {
+    headers: HeaderMap,
+) -> Result<Response, crate::direction::Fault> {
     let _permit = app
         .waiters
         .try_acquire()
@@ -373,14 +464,18 @@ async fn changes(
     // Subscribe before checking state to avoid missing a concurrent commit.
     let mut events = app.events.subscribe();
     for attempt in 0..2 {
-        let current = read_state(&*app.db.lock().await, &device)?;
+        let current = {
+            let db = app.db.lock().await;
+            authorize_session(&db, &app, &device, &headers, false)?;
+            read_state(&db, &device)?
+        };
         if query.epoch != current.epoch {
-            return Err(StatusCode::CONFLICT);
+            return Err(StatusCode::CONFLICT.into());
         }
         if query.after < 0 || query.after > current.revision {
-            return Err(StatusCode::BAD_REQUEST);
+            return Err(StatusCode::BAD_REQUEST.into());
         }
-        if current.revision > query.after {
+        if current.revision > query.after || current.delivery_revision.is_some() {
             return Ok(([(header::CACHE_CONTROL, "no-store")], Json(current)).into_response());
         }
         if attempt == 0 {
@@ -397,17 +492,29 @@ async fn changes(
 async fn content(
     State(app): State<Shared>,
     device: Device,
+    _: DataSession,
     Path(id): Path<String>,
-) -> Result<Response, StatusCode> {
+    headers: HeaderMap,
+) -> Result<Response, crate::direction::Fault> {
     if !canonical_uuid(&id) {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into());
     }
     let db = app.db.lock().await;
-    check_device(&db, &device)?;
-    let bytes: Option<Vec<u8>> = db.query_row(
-        "SELECT e.body FROM v1_messages e JOIN v1_meta m ON e.revision=m.revision WHERE e.message_id=?1",
-        [&id], |r| r.get(0),
-    ).optional().map_err(db_error)?;
+    authorize_session(&db, &app, &device, &headers, false)?;
+    if crate::direction::delivery(&db, &device)
+        .map_err(db_error)?
+        .is_none_or(|(message, _)| message != id)
+    {
+        return Err(StatusCode::GONE.into());
+    }
+    let bytes: Option<Vec<u8>> = db
+        .query_row(
+            "SELECT body FROM v1_messages WHERE message_id=?1 AND body IS NOT NULL",
+            [&id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db_error)?;
     let bytes = bytes.ok_or(StatusCode::GONE)?;
     Ok((
         [
@@ -442,25 +549,25 @@ async fn commit(
     Path(id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, crate::direction::Fault> {
     if !canonical_uuid(&id) || std::str::from_utf8(&body).is_err() {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into());
     }
     let epoch = required_header(&headers, "x-rcs-epoch")?;
     let sensitive = match required_header(&headers, "x-rcs-sensitive")? {
         "0" => false,
         "1" => true,
-        _ => return Err(StatusCode::BAD_REQUEST),
+        _ => return Err(StatusCode::BAD_REQUEST.into()),
     };
     let base: i64 = required_header(&headers, "x-rcs-base-revision")?
         .parse()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     if base < 0 {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into());
     }
     let mut db = app.db.lock().await;
     let tx = db.transaction().map_err(db_error)?;
-    check_device(&tx, &device)?;
+    authorize_session(&tx, &app, &device, &headers, true)?;
     let (current_epoch, current_revision): (String, i64) = tx
         .query_row(
             "SELECT epoch, revision FROM v1_meta WHERE singleton=1",
@@ -469,7 +576,7 @@ async fn commit(
         )
         .map_err(db_error)?;
     if epoch != current_epoch {
-        return Err(StatusCode::CONFLICT);
+        return Err(StatusCode::CONFLICT.into());
     }
     let cancelled: bool = tx
         .query_row(
@@ -479,7 +586,7 @@ async fn commit(
         )
         .map_err(db_error)?;
     if cancelled {
-        return Err(StatusCode::CONFLICT);
+        return Err(StatusCode::CONFLICT.into());
     }
     let body_hash = hash(&body);
     let existing: Option<(i64, String, i64, Vec<u8>, bool)> = tx.query_row(
@@ -492,7 +599,7 @@ async fn commit(
             || old_sensitive != sensitive
             || !bool::from(old_hash.as_slice().ct_eq(&body_hash))
         {
-            return Err(StatusCode::CONFLICT);
+            return Err(StatusCode::CONFLICT.into());
         }
         return Ok((
             [(header::CACHE_CONTROL, "no-store")],
@@ -505,7 +612,7 @@ async fn commit(
         ));
     }
     if base != current_revision {
-        return Err(StatusCode::CONFLICT);
+        return Err(StatusCode::CONFLICT.into());
     }
     let revision = current_revision
         .checked_add(1)
@@ -517,6 +624,14 @@ async fn commit(
         [revision],
     )
     .map_err(db_error)?;
+    crate::direction::distribute(
+        &tx,
+        &app.direction,
+        &device.id,
+        &id,
+        revision,
+        crate::presence::unix_time(),
+    )?;
     tx.commit().map_err(db_error)?;
     drop(db);
     let _ = app.events.send(());
@@ -631,23 +746,31 @@ struct AckResult {
 async fn ack(
     State(app): State<Shared>,
     device: Device,
+    _: DataSession,
+    headers: HeaderMap,
     Json(input): Json<Ack>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, crate::direction::Fault> {
     if !canonical_uuid(&input.message_id)
         || !matches!(input.result.as_str(), "applied" | "self" | "skipped")
     {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into());
     }
     let mut db = app.db.lock().await;
     let tx = db.transaction().map_err(db_error)?;
-    check_device(&tx, &device)?;
+    crate::direction::ack_session(
+        &tx,
+        &app.direction,
+        &device,
+        crate::direction::sid(&headers)?,
+        crate::presence::unix_time(),
+    )?;
     let epoch: String = tx
         .query_row("SELECT epoch FROM v1_meta WHERE singleton=1", [], |r| {
             r.get(0)
         })
         .map_err(db_error)?;
     if epoch != input.epoch {
-        return Err(StatusCode::CONFLICT);
+        return Err(StatusCode::CONFLICT.into());
     }
     let owner: Option<String> = tx
         .query_row(
@@ -658,8 +781,21 @@ async fn ack(
         .optional()
         .map_err(db_error)?;
     let owner = owner.ok_or(StatusCode::GONE)?;
+    let previous: i64 = tx
+        .query_row(
+            "SELECT ack_revision FROM v1_devices WHERE id=?1",
+            [&device.id],
+            |r| r.get(0),
+        )
+        .map_err(db_error)?;
+    if input.revision > previous
+        && owner != device.id
+        && input.revision > crate::direction::issued(&tx, &device.id).map_err(db_error)?
+    {
+        return Err(StatusCode::FORBIDDEN.into());
+    }
     if input.result == "self" && owner != device.id {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into());
     }
     tx.execute(
         "UPDATE v1_devices SET ack_revision=max(ack_revision, ?1) WHERE id=?2",
@@ -672,6 +808,8 @@ async fn ack(
             [&device.id],
             |r| r.get(0),
         )
+        .map_err(db_error)?;
+    crate::direction::acknowledge(&tx, &device.id, &input.message_id, input.revision)
         .map_err(db_error)?;
     tx.commit().map_err(db_error)?;
     Ok((
@@ -707,6 +845,7 @@ mod tests {
             auth: crate::auth::AuthState::default(),
             web: crate::admin::WebState::default(),
             presence: crate::presence::Presence::default(),
+            direction: crate::direction::Runtime::default(),
         });
         (Arc::clone(&app), crate::router(app))
     }
@@ -721,9 +860,16 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::builder()
+                    .header("x-rcs-protocol", "3")
                     .method(method)
                     .uri(url)
                     .header(header::AUTHORIZATION, auth)
+                    .header(
+                        "x-rcs-sync-session",
+                        auth.strip_prefix("Bearer ")
+                            .and_then(|s| s.split_once(':'))
+                            .map_or("", |(id, _)| id),
+                    )
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(body.into())
                     .unwrap(),
@@ -744,6 +890,8 @@ mod tests {
         let body = json!({"deviceId": id, "deviceToken": token}).to_string();
         let response = request(app, Method::POST, "/api/devices", &basic, body).await;
         assert_eq!(response.status(), StatusCode::OK);
+        let control=request(app,Method::PUT,&format!("/api/devices/{id}/sync-direction"),&format!("Bearer {id}:{token}"),json!({"sessionId":id,"version":1,"direction":"BIDIRECTIONAL","paused":false,"connect":true}).to_string()).await;
+        assert_eq!(control.status(), StatusCode::OK);
         (
             id.clone(),
             format!("Bearer {id}:{token}"),
@@ -814,13 +962,23 @@ mod tests {
     async fn sensitive_marker_is_persisted_and_part_of_idempotency() {
         let (_, app) = app();
         let (_, auth, reg) = register_device(&app).await;
+        let (_, receiver, _) = register_device(&app).await;
         let epoch = reg["epoch"].as_str().unwrap();
         let id = Uuid::new_v4().to_string();
         let make = |sensitive: Option<&str>| {
             let mut req = Request::builder()
+                .header("x-rcs-protocol", "3")
                 .method(Method::PUT)
                 .uri(format!("/api/messages/{id}"))
                 .header(header::AUTHORIZATION, &auth)
+                .header(
+                    "x-rcs-sync-session",
+                    auth.strip_prefix("Bearer ")
+                        .unwrap()
+                        .split_once(':')
+                        .unwrap()
+                        .0,
+                )
                 .header("x-rcs-epoch", epoch)
                 .header("x-rcs-base-revision", "0");
             if let Some(value) = sensitive {
@@ -837,7 +995,8 @@ mod tests {
             StatusCode::OK
         );
         let state =
-            json_body(request(&app, Method::GET, "/api/state", &auth, Body::empty()).await).await;
+            json_body(request(&app, Method::GET, "/api/state", &receiver, Body::empty()).await)
+                .await;
         assert_eq!(state["sensitive"], true);
         assert_eq!(
             app.clone().oneshot(make(Some("0"))).await.unwrap().status(),
@@ -856,9 +1015,16 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::builder()
+                    .header("x-rcs-protocol", "3")
                     .method(Method::PUT)
                     .uri(format!("/api/messages/{id}"))
                     .header(header::AUTHORIZATION, auth)
+                    .header(
+                        "x-rcs-sync-session",
+                        auth.strip_prefix("Bearer ")
+                            .and_then(|s| s.split_once(':'))
+                            .map_or("", |(id, _)| id),
+                    )
                     .header("x-rcs-epoch", epoch)
                     .header("x-rcs-base-revision", base)
                     .header("x-rcs-sensitive", "0")
@@ -1014,8 +1180,11 @@ mod tests {
             Body::empty(),
         )
         .await;
-        assert_eq!(body.status(), StatusCode::OK);
-        assert_eq!(to_bytes(body.into_body(), 32).await.unwrap(), "first");
+        assert_eq!(
+            body.status(),
+            StatusCode::GONE,
+            "an acknowledged delivery no longer authorizes re-downloading its body"
+        );
 
         let second = Uuid::new_v4().to_string();
         assert_eq!(
@@ -1050,7 +1219,10 @@ mod tests {
             json_body(request(&app, Method::GET, "/api/state", &b, Body::empty()).await).await;
         assert_eq!(final_state["ackRevision"], 2);
         assert_eq!(final_state["revision"], 2);
-        assert_eq!(final_state["messageId"], second);
+        assert!(
+            final_state["messageId"].is_null(),
+            "acknowledged messages must not be offered again"
+        );
     }
 
     #[tokio::test]
@@ -1197,6 +1369,7 @@ mod tests {
         let obsolete = Uuid::new_v4().to_string();
         let cancel_request = || {
             Request::builder()
+                .header("x-rcs-protocol", "3")
                 .method(Method::DELETE)
                 .uri(format!("/api/messages/{obsolete}"))
                 .header(header::AUTHORIZATION, &a)
@@ -1224,6 +1397,7 @@ mod tests {
             StatusCode::OK
         );
         let cancel_committed = Request::builder()
+            .header("x-rcs-protocol", "3")
             .method(Method::DELETE)
             .uri(format!("/api/messages/{latest}"))
             .header(header::AUTHORIZATION, &a)
@@ -1267,6 +1441,7 @@ mod tests {
             let epoch = reg["epoch"].as_str().unwrap();
             let id = Uuid::new_v4().to_string();
             let cancellation = Request::builder()
+                .header("x-rcs-protocol", "3")
                 .method(Method::DELETE)
                 .uri(format!("/api/messages/{id}"))
                 .header(header::AUTHORIZATION, &auth)
@@ -1315,6 +1490,7 @@ mod tests {
                 auth: crate::auth::AuthState::default(),
                 web: crate::admin::WebState::default(),
                 presence: crate::presence::Presence::default(),
+                direction: crate::direction::Runtime::default(),
             });
             let app = crate::router(state);
             let (_, auth, reg) = register_device(&app).await;

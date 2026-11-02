@@ -182,6 +182,10 @@ pub fn router() -> Router<Shared> {
             "/api/admin/devices/{id}",
             delete(revoke_device).patch(rename_device),
         )
+        .route(
+            "/api/admin/sync-settings",
+            get(sync_settings).put(save_sync_settings),
+        )
         .route("/api/admin/accounts", get(accounts).post(create_account))
         .route("/api/admin/accounts/{id}", delete(revoke_account))
         // A 4096-byte password can expand sixfold when escaped in JSON.
@@ -583,3 +587,48 @@ async fn revoke_account(
 
 #[cfg(test)]
 mod tests;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SyncSettingsInput {
+    backfill_window_minutes: i64,
+}
+async fn sync_settings(
+    State(app): State<Shared>,
+    _: Admin,
+) -> Result<impl IntoResponse, StatusCode> {
+    let db = app.db.lock().await;
+    let valid = db
+        .query_row(
+            "SELECT value FROM rcs_settings WHERE key='sync.reconnect.backfill.window'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .is_ok_and(|n| (0..=1440).contains(&n));
+    let mut stmt=db.prepare("SELECT actor,changed,old_value,new_value FROM rcs_settings_audit ORDER BY id DESC LIMIT 20").map_err(db_error)?;
+    let audit=stmt.query_map([],|r|Ok(serde_json::json!({"actor":r.get::<_,String>(0)?,"changedAt":r.get::<_,i64>(1)?,"oldValue":r.get::<_,Option<i64>>(2)?,"newValue":r.get::<_,i64>(3)?}))).map_err(db_error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
+    Ok(Json(
+        serde_json::json!({"key":"sync.reconnect.backfill.window","backfillWindowMinutes":crate::direction::window(&db,&app.direction),"configurationValid":valid,"audit":audit,"metrics":crate::direction::statistics(&db,&app.direction)}),
+    ))
+}
+async fn save_sync_settings(
+    State(app): State<Shared>,
+    _: Admin,
+    Json(input): Json<SyncSettingsInput>,
+) -> Result<StatusCode, StatusCode> {
+    let actor = app
+        .auth
+        .admin
+        .as_ref()
+        .ok_or(StatusCode::UNAUTHORIZED)?
+        .user
+        .as_str();
+    crate::direction::set_window(
+        &mut *app.db.lock().await,
+        &app.direction,
+        actor,
+        input.backfill_window_minutes,
+    )?;
+    let _ = app.events.send(());
+    Ok(StatusCode::NO_CONTENT)
+}

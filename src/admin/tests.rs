@@ -27,6 +27,7 @@ fn app() -> (Shared, Router) {
         )),
         web: WebState::enabled("https://admin.test").unwrap(),
         presence: crate::presence::Presence::default(),
+        direction: crate::direction::Runtime::default(),
     });
     (Arc::clone(&app), crate::router(app))
 }
@@ -38,12 +39,20 @@ async fn send(
     body: Value,
 ) -> Response {
     let mut request = Request::builder()
+        .header("x-rcs-protocol", "3")
         .method(method)
         .uri(path)
         .header(header::HOST, "admin.test")
         .header(header::CONTENT_TYPE, "application/json");
     for (key, value) in extra {
         request = request.header(*key, *value);
+        if *key == "authorization"
+            && let Some((id, _)) = value
+                .strip_prefix("Bearer ")
+                .and_then(|s| s.split_once(':'))
+        {
+            request = request.header("x-rcs-sync-session", id);
+        }
     }
     app.clone()
         .oneshot(request.body(Body::from(body.to_string())).unwrap())
@@ -107,6 +116,8 @@ async fn register(app: &Router, user: &str, password: &str) -> (String, String, 
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
+    let control=send(app,Method::PUT,&format!("/api/devices/{id}/sync-direction"),&[("authorization",&format!("Bearer {id}:{token}"))],json!({"sessionId":id,"version":1,"direction":"BIDIRECTIONAL","paused":false,"connect":true})).await;
+    assert_eq!(control.status(), StatusCode::OK);
     (
         id.clone(),
         format!("Bearer {id}:{token}"),
@@ -149,6 +160,7 @@ async fn default_web_is_disabled_and_existing_credentials_still_sync() {
         auth: auth::AuthState::default(),
         web: WebState::default(),
         presence: crate::presence::Presence::default(),
+        direction: crate::direction::Runtime::default(),
     });
     let app = crate::router(state);
     assert_eq!(
@@ -225,6 +237,7 @@ async fn login_requires_independent_admin_and_protects_origin_and_headers() {
         );
     }
     let request = Request::builder()
+        .header("x-rcs-protocol", "3")
         .method(Method::POST)
         .uri("/api/admin/login")
         .header(header::HOST, "evil.test")
@@ -240,6 +253,7 @@ async fn login_requires_independent_admin_and_protects_origin_and_headers() {
         StatusCode::FORBIDDEN
     );
     let request = Request::builder()
+        .header("x-rcs-protocol", "3")
         .method(Method::POST)
         .uri("/api/admin/login")
         .header(header::HOST, "admin.test")
@@ -692,8 +706,8 @@ async fn presence_and_labels_are_metadata_only_and_builtin_accounts_cannot_be_de
         .await,
     )
     .await;
-    assert_eq!(response[0]["online"], false);
-    assert_eq!(response[0]["lastSeen"], Value::Null);
+    assert_eq!(response[0]["online"], true);
+    assert!(response[0]["lastSeen"].is_i64());
     send(
         &app,
         Method::GET,
@@ -938,4 +952,127 @@ fn schema_upgrade_preserves_existing_tokens_cursors_and_metadata() {
         )
         .unwrap();
     assert_eq!(tables, 1);
+}
+
+#[tokio::test]
+async fn backfill_setting_requires_admin_csrf_valid_integer_and_audits_changes() {
+    let (shared, app) = app();
+    let (cookie, csrf) = login(&app).await;
+    let path = "/api/admin/sync-settings";
+    assert_eq!(
+        send(&app, Method::GET, path, &[], Value::Null)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send(
+            &app,
+            Method::PUT,
+            path,
+            &[("cookie", &cookie), ("origin", "https://admin.test")],
+            json!({"backfillWindowMinutes":0})
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    let headers = [
+        ("cookie", cookie.as_str()),
+        ("origin", "https://admin.test"),
+        ("x-csrf-token", csrf.as_str()),
+    ];
+    for value in [json!(-1), json!(1441), json!(1.5), json!("5")] {
+        assert!(
+            send(
+                &app,
+                Method::PUT,
+                path,
+                &headers,
+                json!({"backfillWindowMinutes":value})
+            )
+            .await
+            .status()
+            .is_client_error()
+        );
+    }
+    assert_eq!(
+        send(
+            &app,
+            Method::PUT,
+            path,
+            &headers,
+            json!({"backfillWindowMinutes":0})
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    let result =
+        body(send(&app, Method::GET, path, &[("cookie", &cookie)], Value::Null).await).await;
+    assert_eq!(result["backfillWindowMinutes"], 0);
+    assert_eq!(result["audit"][0]["actor"], "administrator");
+    assert_eq!(result["audit"][0]["oldValue"], 5);
+    assert_eq!(result["audit"][0]["newValue"], 0);
+    shared
+        .db
+        .lock()
+        .await
+        .execute("DELETE FROM rcs_settings", [])
+        .unwrap();
+    let result =
+        body(send(&app, Method::GET, path, &[("cookie", &cookie)], Value::Null).await).await;
+    assert_eq!(result["backfillWindowMinutes"], 0);
+    assert_eq!(result["configurationValid"], false);
+}
+
+#[tokio::test]
+async fn corrupt_text_window_can_be_repaired_by_an_administrator() {
+    let (shared, app) = app();
+    let (cookie, csrf) = login(&app).await;
+    shared
+        .db
+        .lock()
+        .await
+        .execute("UPDATE rcs_settings SET value='invalid'", [])
+        .unwrap();
+    let response = send(
+        &app,
+        Method::GET,
+        "/api/admin/sync-settings",
+        &[("cookie", &cookie)],
+        Value::Null,
+    )
+    .await;
+    assert_eq!(body(response).await["backfillWindowMinutes"], 0);
+    let response = send(
+        &app,
+        Method::PUT,
+        "/api/admin/sync-settings",
+        &[
+            ("cookie", &cookie),
+            ("origin", "https://admin.test"),
+            ("x-csrf-token", &csrf),
+        ],
+        json!({"backfillWindowMinutes":5}),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NO_CONTENT,
+        "invalid SQLite type must not prevent administrator repair"
+    );
+    let value = body(
+        send(
+            &app,
+            Method::GET,
+            "/api/admin/sync-settings",
+            &[("cookie", &cookie)],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(value["backfillWindowMinutes"], 5);
+    assert_eq!(value["audit"][0]["oldValue"], Value::Null);
 }

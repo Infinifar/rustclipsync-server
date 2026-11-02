@@ -1,6 +1,6 @@
 # RustClipSync 接口协议
 
-本文描述正式发布的 RustClipSync 同步协议，供桌面、Android、Omaclipsync 及其他客户端适配。`/api/` 是统一的 HTTP 接口前缀，不表示协议版本；各项目的发布版本号独立。所有请求必须经过受信任的 HTTPS；服务器也必须限制监听地址。它只同步 UTF-8 文本，不实现端到端加密。
+本文描述正式发布的 RustClipSync 同步协议，供桌面、Android、Omaclipsync 及其他客户端适配。`/api/` 是统一的 HTTP 接口前缀，不表示协议版本；各项目的发布版本号独立。当前最低客户端协议为 **3**，所有同步请求必须携带 `X-RCS-Protocol: 3`，响应也返回此头。缺失或不支持的版本返回 426 和 `PROTOCOL_UNSUPPORTED`，不回退广播旧协议。旧客户端应继续使用旧版服务端。所有请求必须经过受信任的 HTTPS；服务器也必须限制监听地址。它只同步 UTF-8 文本，不实现端到端加密。
 
 ## 标识和认证
 
@@ -11,15 +11,27 @@
 - `GET /api/devices`：使用账户 Basic 认证列出设备 ID 和各自的确认版本，不返回设备令牌。
 - `DELETE /api/devices/{deviceId}`：使用账户 Basic 认证撤销设备，返回 204。撤销后设备请求返回 401。
 
-服务端可配置独立管理员，并通过可选管理页创建同步专用设备账户。设备账户可由多台设备共用，管理员账户也可登记同步设备；全部使用同一份剪贴板和版本流。登记 JSON 与设备 Bearer 认证格式不变，旧 `RCS_USER` 凭据和已发令牌继续用于同步。配置独立管理员后，列出和撤销设备的 Basic 管理接口仅接受管理员凭据；设备账户与旧同步账户不能管理其他设备。未配置独立管理员时保留原有 Basic 管理权限。密码认证请求受统一限速，超限返回 429；已有设备的 Bearer 同步不消耗此限额。管理页与 `/api/admin/` 会话接口见 [管理说明](ADMINISTRATION.md)。
+服务端可配置独立管理员，并通过可选管理页创建同步专用设备账户。设备账户可由多台设备共用，管理员账户也可登记同步设备；全部使用同一份剪贴板和版本流。登记 JSON 与设备 Bearer 身份格式保留，但配对后的同步必须先完成协议 3 的方向会话上报。已有设备凭据可以保留，不代表旧客户端能通过版本门禁。配置独立管理员后，列出和撤销设备的 Basic 管理接口仅接受管理员凭据；设备账户与旧同步账户不能管理其他设备。未配置独立管理员时保留原有 Basic 管理权限。密码认证请求受统一限速，超限返回 429；已有设备的 Bearer 同步不消耗此限额。管理页与 `/api/admin/` 会话接口见 [管理说明](ADMINISTRATION.md)。
 
 所有 UUID 必须是规范的小写 v4 字符串。版本是服务端事务内递增的非负整数；时间戳仅供显示，不决定顺序。设备发现 `epoch` 改变时必须停止自动同步，丢弃旧实例的游标与待发送消息，重新配对。
 
+## 方向、暂停与会话
+
+完整 WebSocket/HTTP DTO、示例字段、CAS 规则和生命周期见 [设备方向协议](docs/DIRECTION-PROTOCOL.md)。
+
+1. 配对后通过 `GET /api/devices/{deviceId}/sync-direction` 读取当前方向版本。
+2. 生成新 UUID v4 会话 ID，通过 WSS `/api/ws` 上报 `SyncDirectionUpdate`；WS 不可用时用 `PUT /api/devices/{deviceId}/sync-direction` 发送同一操作。`version` 必须是服务端当前版本加一。
+3. 收到 `SyncDirectionAck` 后，数据请求携带 `X-RCS-Sync-Session: <sessionId>`。重连必须先报告最新方向并等 ACK，再读取每设备候选。旧会话或迟到更新不能覆盖新会话。
+4. 三种方向为 `PUSH_ONLY`、`RECEIVE_ONLY`、`BIDIRECTIONAL`。`paused:true` 是第四种客户端运行状态，保留选定方向和配对，但禁止上下行并清除候选。方向未知、已撤销或过期都不交付正文。
+5. 显式退出登录发送 `SyncDirectionRevoke`，失败用同操作 HTTP DELETE 降级；失败时保留未确认状态，不能声称远端已撤销。普通关机仅离线。方向会在 30 天无有效活动后过期；过期判断先于续期，旧流量不能使它复活。
+
+HTTP 在线会话使用 30 秒租约，与管理页“近 60 秒有请求”的状态提示不同。离线补发窗口全局默认 5 分钟、范围 0–1440，0 关闭；只能由管理员动态配置。非零修改只影响新候选的写入 TTL，设 0 会清理旧离线候选。客户端不硬编码窗口。补发是每设备最近一条满足条件的消息，成功处理并 ACK 后按消息 ID 和投递版本清理；旧 ACK 不会删除新候选。
+
 ## 读取与确认
 
-- `GET /api/state`：返回 `epoch`、当前 `revision`、本设备的 `ackRevision`、可为空的 `messageId`、`sourceDeviceId`、Unix 秒级 `createdAt`、UTF-8 字节数 `size` 和 `sensitive` 标记。空状态的版本为 0，消息字段为空。确认只表明设备报告处理结果，不代表用户已阅读。
+- `GET /api/state`：返回 `epoch`、全局当前 `revision`（发送 CAS 基准）、本设备的 `ackRevision`、可为空的 `deliveryRevision`（本条投递版本），以及可为空的 `messageId`、`sourceDeviceId`、Unix 秒级 `createdAt`、UTF-8 字节数 `size` 和 `sensitive` 标记。没有可投递消息时所有消息字段和 `deliveryRevision` 为空，即使全局 `revision` 大于 0。接收去重使用 `deliveryRevision`，不能把全局版本当作已应用的消息版本。确认只表明设备报告处理结果，不代表用户已阅读。
 - `GET /api/changes?epoch=<epoch>&after=<revision>`：当前版本较新时立即返回上述状态；否则最多等待 25 秒，超时返回 204。客户端超时后重新请求；断线或收到重复通知时按版本重新读取。并发等待达到上限返回 503。
-- `GET /api/messages/{messageId}/content`：只返回目前最新消息的原始 UTF-8 字节；若读取期间版本已变化，返回 410，客户端重新读取状态。正文上限为 10 MiB。
+- `GET /api/messages/{messageId}/content`：只返回本设备当前被授权投递的原始 UTF-8 字节；可能是仍有效的每设备补发，未必等于全局最新消息。每次下载重新校验会话和方向；消息已确认、被替代或不再授权时返回 410，客户端重新读取状态。正文上限为 10 MiB。
 - `POST /api/ack`：JSON `{"epoch":"…","revision":1,"messageId":"…","result":"applied"}`。`result` 可为 `applied`、`self` 或 `skipped`。确认是单调且幂等的，返回 `{"ackRevision":1}`；重复确认或延迟到达的旧确认不会回退游标。确认不会删除当前消息或影响其他设备的确认游标。
 
 确认结果的含义：
@@ -36,7 +48,7 @@
 
 每次真实本地复制生成新的 UUID v4 `messageId`。相同正文的两次真实复制是不同事件；同一次请求重试必须保留 ID、正文、`epoch` 和基准版本。
 
-- `PUT /api/messages/{messageId}`：正文为原始 UTF-8，携带 `X-RCS-Epoch`、`X-RCS-Base-Revision` 和必需的 `X-RCS-Sensitive`（`0` 或 `1`）。只有基准版本仍是当前版本才提交，返回 `{"epoch":"…","revision":1,"messageId":"…","duplicate":false}`。同一 ID 与完全相同的设备、正文、敏感标记和基准版本再次提交会返回原版本及 `duplicate:true`，不产生通知；同 ID 不同请求或版本冲突返回 409。接收设备默认跳过已标记的敏感内容；启用后可只保存到加密私有收件区并确认 `skipped`，也可由用户显式允许写入系统剪贴板。写入剪贴板时应保留敏感标记。
+- `PUT /api/messages/{messageId}`：仅允许未暂停的推送或双向会话；接收专用、未知或撤销状态不能上传。正文为原始 UTF-8，携带 `X-RCS-Epoch`、`X-RCS-Base-Revision` 和必需的 `X-RCS-Sensitive`（`0` 或 `1`）。只有基准版本仍是当前版本才提交，返回 `{"epoch":"…","revision":1,"messageId":"…","duplicate":false}`。同一 ID 与完全相同的设备、正文、敏感标记和基准版本再次提交会返回原版本及 `duplicate:true`，不产生通知；同 ID 不同请求或版本冲突返回 409。接收设备默认跳过已标记的敏感内容；启用后可只保存到加密私有收件区并确认 `skipped`，也可由用户显式允许写入系统剪贴板。写入剪贴板时应保留敏感标记。
 - `DELETE /api/messages/{messageId}`：携带 `X-RCS-Epoch`。返回 `{"state":"cancelled","revision":null}`，表示未提交的旧请求已被原子取消；如果它实际已提交，返回 `{"state":"committed","revision":1}`。此操作可幂等重试。若上传与取消竞争，只有其中一种结果成立，取消成功后延迟到达的旧上传不能写入。
 
 客户端离线期间应只保留最新未发送复制。若更早的请求已经发出但结果未知，先调用取消接口：已提交则以前一结果为基准处理最新复制；已取消则以原基准处理最新复制。服务端基准发生其他设备更新时返回 409，客户端保留本地内容并提示冲突，不静默覆盖。已提交并被其他在线设备看到的旧消息无法撤回。

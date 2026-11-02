@@ -1,11 +1,11 @@
 [package]
 name = "rustclipsync-server"
-version = "2.0.0"
+version = "3.0.0"
 edition = "2024"
 license = "MIT"
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 argon2 = "0.5"
 base64 = "0.22"
 getrandom = "0.3"
@@ -17,7 +17,10 @@ subtle = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util"] }
 uuid = { version = "1", features = ["v4"] }
 url = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 futures-util = "0.3"
+tokio-tungstenite = "0.29"

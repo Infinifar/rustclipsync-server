@@ -87,7 +87,41 @@ History is retained for seven days by default. Set `RCS_HISTORY_RETENTION_DAYS` 
 
 An optional, responsive [administration page](ADMINISTRATION.md) at `/admin/` lists devices, recent activity and last activity times, lets you label devices, create sync-only device accounts shared by several devices, and revoke either one device or an entire account. All accounts share one clipboard. Online status means an authenticated request within 60 seconds, not guaranteed reachability.
 
-The unique administrator has separate `RCS_ADMIN_USER` and `RCS_ADMIN_PASSWORD` credentials read from the local `.env`; the administrator can also pair sync clients. Existing `RCS_USER` credentials and issued device tokens remain valid for synchronization. With an independent administrator configured, the old sync account no longer grants device-management access. Device accounts cannot administer the server. The web page is disabled by default; follow the [setup and security guide](ADMINISTRATION.md) to use `docker-compose.admin.yml` and configure an HTTPS origin. No separate administrator password file is needed. It uses short-lived HttpOnly sessions, CSRF protection, bounded password authentication and Argon2id account password hashes. Schema additions preserve existing paired devices.
+The unique administrator has separate `RCS_ADMIN_USER` and `RCS_ADMIN_PASSWORD` credentials read from the local `.env`; the administrator can also pair sync clients. Existing `RCS_USER` credentials and issued device tokens remain valid for synchronization. With an independent administrator configured, the old sync account no longer grants device-management access. Device accounts cannot administer the server. The web page is disabled by default; follow the [setup and security guide](ADMINISTRATION.md) to use `docker-compose.admin.yml` and configure an HTTPS origin. No separate administrator password file is needed. It uses short-lived HttpOnly sessions, CSRF protection, bounded password authentication and Argon2id account password hashes. Schema additions preserve existing device credentials; using them requires a protocol-3 client.
+
+## Direction filtering and reconnect backfill
+
+This release requires **client protocol 3**. Older clients are rejected with HTTP 426 (`PROTOCOL_UNSUPPORTED`); use the previous server release with old clients. `/api/` remains the route prefix. Upgrade the core and clients together; the development branch is not an automatic production rollout.
+
+| Client state | Upload | Receive |
+| --- | --- | --- |
+| Push only | Yes | No |
+| Receive only | No | Yes |
+| Bidirectional | Yes | Yes |
+| Paused | No | No |
+| Unknown / revoked / expired | No | No |
+
+Clients report direction after connection/reconnection and on setting changes. They wait for an ACK before receiving. WebSocket direction control at `/api/ws` and HTTP fallback share the same session/version CAS, preventing delayed requests from restoring an old session. Explicit logout revokes direction; normal process exit preserves offline eligibility. Valid direction expires after 30 inactive days. Pausing keeps the selected direction and pairing, and clears pending deliveries. Local direction/sensitive/regex filters remain additional safeguards.
+
+```mermaid
+flowchart LR
+    C[Client direction report] --> G[Protocol and device authentication]
+    G --> A[Session CAS and ACK]
+    M[New clipboard message] --> F[Direction filter]
+    A --> F
+    F --> L[Online: one device delivery]
+    F --> B[Offline: latest eligible candidate with fixed TTL]
+    B --> R[Reconnect, report and ACK]
+    R --> L
+    L --> K[Client persists result and ACKs]
+    K --> D[Remove matching device candidate]
+```
+
+The management page contains **Reconnect backfill**, backed by `sync.reconnect.backfill.window`. It is global, defaults to **5 minutes**, accepts **0–1440**, and saves immediately without restart. **0 disables offline storage and replay**, while online synchronization still works. Each device keeps only its newest eligible candidate, referencing the shared encrypted message rather than copying its text. Nonzero setting changes affect newly written TTLs only; zero clears old offline candidates. Only the administrator may save it; actor, time, old value and new value are audited. Invalid input is rejected. Missing, corrupt or out-of-range runtime configuration falls back to **0** with a warning.
+
+The [wire specification](PROTOCOL.md) and [direction contract](docs/DIRECTION-PROTOCOL.md) cover WS frames, HTTP DTOs, session fencing, ACKs, expiry and errors. All sync requests require `X-RCS-Protocol: 3`; data requests also use `X-RCS-Sync-Session`. Global `revision` is the sending conflict baseline; nullable `deliveryRevision` identifies the per-device receive event. Metadata and body downloads are both filtered. HTTP uses a 30-second online lease; the management page's recent-activity badge is an observation, not proof of connectivity.
+
+Administrator-only `GET /api/admin/sync-settings` reports the effective window, recent audit entries, report/error/WS/HTTP/filter/unknown/revocation/expiry/backfill counters and configuration alerts. Counters reset on restart; the settings and audit survive in SQLCipher. Backfill counts record selected candidates; delivery is confirmed separately by client ACK. JSON logs contain validated device/message IDs and reasons, never clipboard text or credentials. Set `RUST_LOG=debug` for filtered-message diagnostics. If no message arrives, check protocol 3, a successful direction ACK/current session, pause/receive policy, the offline window/expiry, then local filters. Database, Origin and credential setup remain in the [administration guide](ADMINISTRATION.md).
 
 ## Upgrades, backup and recovery
 

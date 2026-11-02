@@ -14,15 +14,15 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-features
       - name: Build server for HTTPS interoperability
         run: cargo build --locked
       - name: Check out the verified shared core
         uses: actions/checkout@v5
         with:
           repository: Infinifar/rustclipsync-core
-          ref: 5816bb5d18bc38bd26cca1ed6e7c5c093bfacd92
+          ref: 9d80fac36170216436bd6e14db019c12e7dc4817
           path: .ci/rustclipsync-core
           persist-credentials: false
       - name: Verify server and shared core over HTTPS
