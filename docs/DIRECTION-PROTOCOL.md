@@ -105,6 +105,8 @@ pause, report state (`reported`, `unknown`, `revoked`, `expired`), report timest
 activity expiry, last report source, direction version and active data lease.
 No session identifiers or text are returned. Reads do not renew TTL or presence.
 Acceptance is not proof of client ACK receipt or a system clipboard write.
-The management page has Devices / Accounts / Settings tabs; the global backfill
-window, audit and process-lifetime routing counters are under Settings.
+The management page has Devices / Accounts / Settings / About tabs. The global
+backfill window and audit are under Settings; process-lifetime routing counters,
+receive troubleshooting and version information are under About. Checking public
+GitHub releases is manual, credential-free and never redeploys the container.
 Native protocol-3 endpoints and client direction negotiation are unchanged.

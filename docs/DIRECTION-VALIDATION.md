@@ -93,3 +93,17 @@ and data lease using one LEFT JOIN; this does not alter client data routes.
 This section records the admin update separately from the original protocol
 fixture validation and its historical practical limits above. Local container
 rollout and installed-client checks are recorded in the deployment handoff.
+
+## About and tooltip update — 2026-11-02
+
+- 47 Rust tests and strict Clippy pass; the new administrator-only about DTO
+  contains only compiled version/protocol and keeps cache/auth protections.
+- Disposable Chromium passes four-tab keyboard navigation, mouse/focus tooltip
+  with Escape dismissal, touch expansion, settings/about separation and dirty
+  settings preservation. Version checks are intercepted with synthetic GitHub
+  responses: newer/equal/older stable versions, rate limit, missing release,
+  invalid/prerelease/oversized bodies. Requests omit cookies, auth/CSRF and
+  referrers; release destinations remain pinned. There are no automatic checks
+  or external asset requests. The old binary fails at the missing tooltip.
+- Desktop/mobile, light/dark, English/Chinese screenshots are retained under
+  target/admin-ui. The existing system is preserved; no visual redesign.

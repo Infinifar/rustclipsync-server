@@ -16,6 +16,8 @@ const password='disposable-admin-password',devicePassword='disposable-device-pas
 const temp=await mkdtemp(join(tmpdir(),'rcs-admin-ui-'));
 let server,chrome,proxy,ws;
 let holdNextDeviceRequest=false,heldDeviceResponse;
+let releaseFixture={status:200,value:{tag_name:'v3.1.0',draft:false,prerelease:false}};const releaseRequests=[];
+const releaseUrl='https://api.github.com/repos/Infinifar/rustclipsync-server/releases/latest';
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 async function port(){const socket=net.createServer();socket.listen(0,'127.0.0.1');await once(socket,'listening');const p=socket.address().port;await new Promise(r=>socket.close(r));return p;}
 async function until(fn,description){for(let i=0;i<150;i++){if(await fn())return;await delay(100);}throw new Error(`Timed out: ${description}`);}
@@ -49,12 +51,12 @@ try {
   await until(async()=>{try{devtools=(await readFile(join(profile,'DevToolsActivePort'),'utf8')).trim().split('\n');return devtools.length===2;}catch{return false;}},'disposable browser');
   ws=new WebSocket(`ws://127.0.0.1:${devtools[0]}${devtools[1]}`);await once(ws,'open');
   let next=0;const pending=new Map();const exceptions=[],remoteRequests=[];
-  ws.addEventListener('message',event=>{const m=JSON.parse(event.data);if(m.id){const p=pending.get(m.id);if(p){pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(new Error(JSON.stringify(m.error))):p.resolve(m.result);}}else if(m.method==='Runtime.exceptionThrown'){exceptions.push(m.params.exceptionDetails.text);}else if(m.method==='Network.requestWillBeSent' && !m.params.request.url.startsWith(origin) && !m.params.request.url.startsWith('about:'))remoteRequests.push(m.params.request.url);});
+  ws.addEventListener('message',event=>{const m=JSON.parse(event.data);if(m.id){const p=pending.get(m.id);if(p){pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(new Error(JSON.stringify(m.error))):p.resolve(m.result);}}else if(m.method==='Fetch.requestPaused'){releaseRequests.push(m.params.request);cdp('Fetch.fulfillRequest',{requestId:m.params.requestId,responseCode:releaseFixture.status,responseHeaders:[{name:'Access-Control-Allow-Origin',value:'*'},{name:'Content-Type',value:'application/json'}],body:Buffer.from(JSON.stringify(releaseFixture.value)).toString('base64')},m.sessionId).catch(e=>exceptions.push(e.message));}else if(m.method==='Runtime.exceptionThrown'){exceptions.push(m.params.exceptionDetails.text);}else if(m.method==='Network.requestWillBeSent' && !m.params.request.url.startsWith(origin) && !m.params.request.url.startsWith('about:'))remoteRequests.push(m.params.request.url);});
   const cdp=(method,params={},sessionId)=>new Promise((resolve,reject)=>{const id=++next;const timer=setTimeout(()=>{pending.delete(id);reject(new Error(`CDP timeout: ${method}`));},15000);pending.set(id,{resolve,reject,timer});ws.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));});
   const {targetId}=await cdp('Target.createTarget',{url:'about:blank'});
   const {sessionId}=await cdp('Target.attachToTarget',{targetId,flatten:true});
   const command=(method,params)=>cdp(method,params,sessionId);
-  await command('Page.enable');await command('Runtime.enable');await command('Network.enable');await command('Accessibility.enable');
+  await command('Page.enable');await command('Runtime.enable');await command('Network.enable');await command('Accessibility.enable');await command('Fetch.enable',{patterns:[{urlPattern:releaseUrl,requestStage:'Request'}]});
   const evaluate=async expression=>{const result=await command('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(result.exceptionDetails)throw new Error(result.exceptionDetails.text);return result.result.value;};
   const click=selector=>evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
   const fill=(id,value)=>evaluate(`document.getElementById(${JSON.stringify(id)}).value=${JSON.stringify(value)}`);
@@ -89,6 +91,14 @@ try {
   assert.deepEqual(await evaluate(`Array.from(document.querySelectorAll('.sync-direction'),e=>e.textContent)`),['Send only','Receive only','Bidirectional','Paused · Bidirectional']);
   assert.equal(await evaluate(`document.getElementById('settings-panel').hidden`),true,'settings must not appear on Devices');
   const beforeDiagnostics=await evaluate(`fetch('/api/admin/devices').then(r=>r.json())`);
+  const summaryRect=await evaluate(`(()=>{const r=document.querySelector('#device-rows details summary').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
+  await command('Input.dispatchMouseEvent',{type:'mouseMoved',...summaryRect});await wait(`!document.getElementById('sync-report-help').hidden`);
+  await capture('device-tooltip',1440,1045);
+  await command('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape'});await command('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape'});
+  assert.equal(await evaluate(`document.getElementById('sync-report-help').hidden`),true,'Escape dismisses tooltip');
+  await command('Input.dispatchMouseEvent',{type:'mouseMoved',x:10,y:10});
+  await evaluate(`document.querySelector('#device-rows details summary').focus()`);await wait(`!document.getElementById('sync-report-help').hidden`);
+  await evaluate(`document.getElementById('refresh').focus()`);await wait(`document.getElementById('sync-report-help').hidden`);
   await click('#device-rows details summary');
   await click('#refresh');await wait(`!document.getElementById('refresh').disabled`);
   assert.equal(await evaluate(`document.querySelector('#device-rows details').open`),true,'refresh keeps open diagnostics');
@@ -96,6 +106,11 @@ try {
   await capture('devices-details-desktop',1440,1045);await click('#device-rows details summary');
   await capture('devices-desktop',1440,1045);
   await capture('devices-mobile',390,844,true);
+  await command('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
+  await click('#device-rows details summary');
+  assert.equal(await evaluate(`getComputedStyle(document.querySelector('#device-rows .touch-help')).display`),'block','touch users can expand the same explanation');
+  await capture('device-details-touch',390,844,true);await click('#device-rows details summary');
+  await command('Emulation.setTouchEmulationEnabled',{enabled:false});
   assert.ok(await evaluate(`document.documentElement.scrollWidth<=window.innerWidth`),'no mobile horizontal overflow');
   await command('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'dark'}]});await capture('devices-dark',1440,1045);await command('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'light'}]});
   await click('#tab-settings');
@@ -110,6 +125,7 @@ try {
   assert.equal(await evaluate(`document.getElementById('backfill-window').value`),'12','tab changes and refresh preserve dirty input');
   assert.equal(await evaluate(`fetch('/api/admin/sync-settings').then(r=>r.json()).then(v=>v.backfillWindowMinutes)`),5,'unsaved input does not change policy');
   assert.equal(await evaluate(`document.querySelectorAll('#sync-metrics>div').length`),10);
+  assert.equal(await evaluate(`document.getElementById('sync-metrics').closest('[role=tabpanel]').id`),'about-panel','diagnostics belong to About');
 
   await fill('backfill-window','0');await submit('sync-settings-form');await wait(`document.getElementById('sync-settings-status').textContent.includes('saved') && document.getElementById('sync-settings-audit').textContent.includes('administrator')`);
   assert.equal(await evaluate(`fetch('/api/admin/sync-settings').then(r=>r.json()).then(v=>v.backfillWindowMinutes)`),0);
@@ -120,6 +136,27 @@ try {
   await command('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'dark'}]});await capture('settings-dark',1440,1045);await command('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'light'}]});
   await evaluate(`window.scrollTo(0,0)`);
   assert.equal(await evaluate(`fetch('/api/admin/sync-settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({backfillWindowMinutes:5})}).then(r=>r.status)`),403);
+  await click('#tab-about');
+  assert.equal(await evaluate(`document.getElementById('server-version').textContent`),'3.0.0');
+  assert.equal(await evaluate(`document.getElementById('protocol-version').textContent`),'3');
+  assert.deepEqual(remoteRequests,[],'About must not check for updates automatically');
+  const cases=[
+    [200,{tag_name:'v3.1.0',draft:false,prerelease:false,html_url:'https://example.invalid/unsafe'},'newer release'],
+    [200,{tag_name:'v3.0.0',draft:false,prerelease:false},'latest release'],
+    [200,{tag_name:'v2.0.0',draft:false,prerelease:false},'newer than'],
+    [403,{},'rate limit'],[404,{},'No published'],
+    [200,{tag_name:'v3.1.0<script>',draft:false,prerelease:false},'could not be verified'],
+    [200,{tag_name:'v3.1.0',draft:false,prerelease:true},'could not be verified'],
+    [200,{body:'x'.repeat(262145)},'could not be verified']
+  ];
+  for(const [status,value,text] of cases){releaseFixture={status,value};await click('#check-update');await wait(`!document.getElementById('check-update').disabled && document.getElementById('update-status').textContent.includes(${JSON.stringify(text)})`);}
+  assert.equal(await evaluate(`document.getElementById('release-link').href`),'https://github.com/Infinifar/rustclipsync-server/releases/latest','release URLs stay pinned to the project');
+  for(const request of releaseRequests){assert.equal(request.url,releaseUrl);assert.ok(!Object.keys(request.headers).some(key=>['cookie','authorization','x-csrf-token'].includes(key.toLowerCase())),'no admin/device credentials to GitHub');assert.ok(!request.headers.Referer,'no referrer to GitHub');}
+  releaseFixture={status:200,value:{tag_name:'v3.1.0',draft:false,prerelease:false}};await click('#check-update');await wait(`!document.getElementById('check-update').disabled && document.getElementById('update-status').textContent.includes('newer release')`);
+  await capture('about-desktop',1440,1045);await capture('about-mobile',390,844,true);
+  await click('#language');await capture('about-mobile-zh',390,844,true);await click('#language');
+  assert.ok(await evaluate(`document.documentElement.scrollWidth<=window.innerWidth`),'About fits mobile');
+  await command('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'dark'}]});await capture('about-dark',1440,1045);await command('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'light'}]});
   const ax=await command('Accessibility.getFullAXTree');assert.equal(ax.nodes.filter(n=>n.role?.value==='button'&&!n.name?.value).length,0,'buttons need accessible names');
   const cookies=await command('Network.getCookies',{urls:[origin]});const cookie=cookies.cookies.find(c=>c.name==='__Host-rcs-admin');assert.ok(cookie?.httpOnly&&cookie.secure&&cookie.sameSite==='Strict');
   assert.equal(await evaluate('localStorage.length+sessionStorage.length'),0,'no credentials in web storage');
@@ -151,12 +188,12 @@ try {
   await wait(`document.getElementById('device-rows').children.length===2`);
   assert.equal(await evaluate(`fetch('/api/admin/session').then(r=>r.status)`),200);
   await click('#logout');await wait(`!document.getElementById('login-panel').hidden`);
-  assert.deepEqual(exceptions,[],'no browser runtime exceptions');assert.deepEqual(remoteRequests,[],'no external asset requests');
-  console.log('PASS: HTTPS admin login, multi-device account, presence, read-only sync diagnostics, three tabs/keyboard, dirty settings, GitHub link, labels/XSS, CSRF, cookie flags, keyboard dialogs, account revocation, client isolation, logout and session replacement race');
+  assert.deepEqual(exceptions,[],'no browser runtime exceptions');assert.equal(remoteRequests.length,releaseRequests.length,'only explicit update checks may contact GitHub');assert.ok(remoteRequests.every(url=>url===releaseUrl),'no external assets or other destinations');
+  console.log('PASS: HTTPS admin login, multi-device account, presence, read-only sync diagnostics, four tabs/keyboard, hover/focus tooltip, dirty settings, About/version, bounded credential-free update checks, GitHub link, labels/XSS, CSRF, cookie flags, keyboard dialogs, account revocation, client isolation, logout and session replacement race');
   console.log('Screenshots:',screenshots);
 } finally {
   if(ws)ws.close();
   for(const child of [chrome,server])if(child&&child.exitCode===null){child.kill('SIGTERM');await Promise.race([once(child,'exit'),delay(3000)]);if(child.exitCode===null)child.kill('SIGKILL');}
   if(proxy){proxy.closeAllConnections();await new Promise(r=>proxy.close(r));}
-  await rm(temp,{recursive:true,force:true});
+  await rm(temp,{recursive:true,force:true,maxRetries:5,retryDelay:200});
 }

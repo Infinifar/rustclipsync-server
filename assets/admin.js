@@ -30,8 +30,11 @@
     metricReports:'已接受上报',metricReportErrors:'上报错误',metricWsReports:'WS 上报',metricHttpReports:'HTTP 上报',metricFiltered:'过滤下发',metricUnknown:'未知状态检查',metricRevocations:'方向撤销',metricExpired:'方向过期',metricBackfills:'补发候选',metricConfigurationAlerts:'配置告警',
     troubleshooting:'设备无法接收时',checkProtocol:'使用协议 3 客户端，并检查客户端连接状态。',checkDirection:'在设备页检查接收方向、暂停状态、方向上报与数据租约。',checkBackfill:'重连时检查补发窗口与到期时间。新设备不会接收之前的历史。',checkLocal:'检查客户端过滤器与敏感内容设置。敏感文本可能仅保存在收件区，不写入系统剪贴板。'
   });
-  const tabs=['devices','accounts','settings'];
+  Object.assign(messages.en,{about:'About',aboutServer:'About this server',serverVersion:'Server version',protocolVersion:'Client protocol',checkUpdate:'Check for updates',updatePrivacy:'Only when you click: your browser contacts the public GitHub Releases API. No clipboard data, device credentials or administrator session is sent. Containers are not updated automatically.',viewRelease:'View release notes',updateChecking:'Checking GitHub releases…',updateAvailable:'A newer release is available:',updateCurrent:'You are running the latest release:',updateAhead:'This server is newer than the latest published release:',updateFailed:'Unable to check for updates. Try again later or visit the releases page.',updateRateLimit:'GitHub rate limit reached. Wait before checking again.',updateMissing:'No published release was found.',updateInvalid:'The release response could not be verified.'});
+  Object.assign(messages.zh,{about:'关于',aboutServer:'关于服务端',serverVersion:'服务端版本',protocolVersion:'客户端协议',checkUpdate:'检查更新',updatePrivacy:'仅在点击后，由浏览器访问公开的 GitHub Releases API，不发送剪贴板内容、设备凭据或管理员会话。不会自动更新容器。',viewRelease:'查看版本发布说明',updateChecking:'正在检查 GitHub 正式版本…',updateAvailable:'有更新的正式版本：',updateCurrent:'当前已是最新正式版本：',updateAhead:'当前服务端版本高于最新已发布版本：',updateFailed:'无法检查更新，请稍后重试或查看版本发布页面。',updateRateLimit:'GitHub 请求已达限额，请稍后再检查。',updateMissing:'尚未找到已发布的正式版本。',updateInvalid:'无法验证版本响应。'});
+  const tabs=['devices','accounts','settings','about'];
   const metrics=['reports','reportErrors','wsReports','httpReports','filtered','unknown','revocations','expired','backfills','configurationAlerts'];
+  let serverInfo=null,updateCheck=null,updateResult=null,tooltipOwner=null,tooltipTimer=null;
   let syncSettings=null,settingsDirty=false,settingsEdit=0,lastNotice='',savedStatus=false,refreshedAt=null;
   let lang = 'en';
   let csrf = '', currentUser = '', tab = 'devices', devices = [], accounts = [], target = null, labelTarget = null, timer = null, lastTouch = 0, loadingSession = '';
@@ -45,6 +48,7 @@
     document.querySelectorAll('.dialog-heading .dialog-close').forEach(e=>e.setAttribute('aria-label',t('close')));
     $('language').textContent=lang==='zh'?'EN':'中文';
     if(currentUser)$('signed-in').textContent=`${t('signedIn')} ${currentUser}`;
+    renderUpdate();
     if(lastNotice)$('notice').textContent=t(lastNotice);
     if(savedStatus)$('sync-settings-status').textContent=t('backfillSaved');
     if(refreshedAt)renderUpdated();
@@ -55,7 +59,7 @@
   function notice(key) {lastNotice=key;$('notice').textContent=t(key);$('notice').hidden=false;}
   function message(status) {return t(({400:'badRequest',401:'sessionExpired',403:'forbidden',404:'notFound',409:'conflict',413:'badRequest',429:'rateLimit'})[status]||'serverError');}
   function signedOut(reason='') {
-    csrf='';currentUser='';devices=[];accounts=[];syncSettings=null;settingsDirty=false;settingsEdit++;lastNotice='';savedStatus=false;refreshedAt=null;target=null;labelTarget=null;$('backfill-window').value='';$('sync-metrics').replaceChildren();showError('sync-settings-error','');$('notice').textContent='';$('notice').hidden=true;$('updated').textContent='';$('signed-in').textContent='';$('sync-settings-audit').textContent='';$('sync-settings-status').textContent='';clearInterval(timer);timer=null;
+    hideTooltip();updateCheck?.abort();updateCheck=null;updateResult=null;serverInfo=null;$('server-version').textContent='';$('protocol-version').textContent='';$('update-status').textContent='';$('release-link').hidden=true;$('check-update').disabled=false;csrf='';currentUser='';devices=[];accounts=[];syncSettings=null;settingsDirty=false;settingsEdit++;lastNotice='';savedStatus=false;refreshedAt=null;target=null;labelTarget=null;$('backfill-window').value='';$('sync-metrics').replaceChildren();showError('sync-settings-error','');$('notice').textContent='';$('notice').hidden=true;$('updated').textContent='';$('signed-in').textContent='';$('sync-settings-audit').textContent='';$('sync-settings-status').textContent='';clearInterval(timer);timer=null;
     document.querySelectorAll('dialog[open]').forEach(d=>d.close());
     $('account-form').reset();$('rename-form').reset();$('revoke-target').textContent='';$('revoke-description').textContent='';$('filter').replaceChildren(new Option(t('allAccounts'),''));showError('page-error','');$('password').value='';$('workspace').hidden=true;$('logout').hidden=true;$('login-panel').hidden=false;
     const expanded=new Set([...$('device-rows').querySelectorAll('details[open]')].map(e=>e.dataset.deviceId));
@@ -76,7 +80,7 @@
   async function load() {
     const session=csrf;
     if(!session || loadingSession===session)return;loadingSession=session;$('refresh').disabled=true;showError('page-error','');
-    try {const [nextDevices,nextAccounts,nextSettings]=await Promise.all([api('devices'),api('accounts'),api('sync-settings')]);if(csrf!==session)return;devices=nextDevices;accounts=nextAccounts;syncSettings=nextSettings;render();refreshedAt=new Date();renderUpdated();}
+    try {const [nextDevices,nextAccounts,nextSettings,nextInfo]=await Promise.all([api('devices'),api('accounts'),api('sync-settings'),api('about')]);if(csrf!==session)return;devices=nextDevices;accounts=nextAccounts;syncSettings=nextSettings;serverInfo=nextInfo;render();refreshedAt=new Date();renderUpdated();}
     catch(error){if(csrf===session && !(error instanceof StaleSession))showError('page-error',error.message);}finally{if(loadingSession===session){loadingSession='';$('refresh').disabled=false;}}
   }
   async function signedIn(info) {
@@ -95,12 +99,49 @@
     cell.append(element('p',accepted?(sync.paused?`${t('paused')} · ${direction}`:direction):t(reportKey),'sync-direction'));
     if(accepted)cell.append(element('p',t(reportKey),'small muted sync-report'));
     const details=element('details',undefined,'sync-details');details.dataset.deviceId=device.deviceId;details.open=expanded;
-    details.append(element('summary',t('syncDetails')));
+    const summary=element('summary',t('syncDetails'));summary.setAttribute('aria-describedby','sync-report-help');
+    summary.addEventListener('pointerenter',event=>{if(event.pointerType!=='touch')showTooltip(summary);});
+    summary.addEventListener('pointerleave',scheduleTooltipHide);
+    summary.addEventListener('focus',()=>{if(summary.matches(':focus-visible'))showTooltip(summary);});
+    summary.addEventListener('blur',scheduleTooltipHide);details.append(summary);
     const list=element('dl');
     for(const [key,value] of [['reportedAt',date(sync.reportedAt)],['reportSource',sync.lastReportSource?.toUpperCase()||t('unknown')],['directionVersion',sync.version??t('unknown')],['expiresAt',date(sync.expiresAt)],['dataLease',t(sync.dataLeaseActive?'leaseActive':'leaseInactive')],['ackRevision',device.ackRevision]])list.append(element('dt',t(key)),element('dd',String(value)));
-    details.append(list,element('p',t('reportHelp'),'small muted'));cell.append(details);
+    details.append(list,element('p',t('reportHelp'),'small muted touch-help'));cell.append(details);
+  }
+  function hideTooltip() {clearTimeout(tooltipTimer);tooltipOwner=null;$('sync-report-help').hidden=true;}
+  function showTooltip(owner) {
+    clearTimeout(tooltipTimer);tooltipOwner=owner;const tip=$('sync-report-help');tip.textContent=t('reportHelp');tip.hidden=false;
+    const rect=owner.getBoundingClientRect(),box=tip.getBoundingClientRect();
+    tip.style.left=`${Math.max(12,Math.min(rect.left,innerWidth-box.width-12))}px`;
+    tip.style.top=`${Math.max(12,rect.bottom+8+box.height<innerHeight-12?rect.bottom+8:rect.top-box.height-8)}px`;
+  }
+  function scheduleTooltipHide() {clearTimeout(tooltipTimer);tooltipTimer=setTimeout(()=>{if(!$('sync-report-help').matches(':hover')&&!(document.activeElement===tooltipOwner&&tooltipOwner?.matches(':focus-visible')))hideTooltip();},100);}
+  function renderUpdate() {
+    $('update-status').textContent=updateResult?`${t(updateResult.key)}${updateResult.version?' '+updateResult.version:''}`:'';
+    $('release-link').hidden=!updateResult||updateResult.key==='updateChecking';
+  }
+  function version(value) {if(typeof value!=='string'||!/^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value)||value.length>64)return null;const parts=value.replace(/^v/,'').split('.').map(Number);return parts.every(Number.isSafeInteger)?parts:null;}
+  async function checkUpdate() {
+    if(!csrf||updateCheck||!serverInfo)return;
+    const session=csrf,controller=new AbortController();updateCheck=controller;const timeout=setTimeout(()=>controller.abort(),10000);
+    $('check-update').disabled=true;updateResult={key:'updateChecking'};renderUpdate();
+    try {
+      const response=await fetch('https://api.github.com/repos/Infinifar/rustclipsync-server/releases/latest',{headers:{Accept:'application/vnd.github+json'},credentials:'omit',referrerPolicy:'no-referrer',redirect:'error',cache:'no-store',signal:controller.signal});
+      if(!response.ok)throw new Error(response.status===403||response.status===429?'updateRateLimit':response.status===404?'updateMissing':'updateFailed');
+      const reader=response.body?.getReader();if(!reader)throw new Error('updateInvalid');
+      let bytes=0,body='';const decoder=new TextDecoder('utf-8',{fatal:true});
+      try{while(true){const {done,value}=await reader.read();if(done)break;bytes+=value.byteLength;if(bytes>262144){await reader.cancel();throw new Error('updateInvalid');}body+=decoder.decode(value,{stream:true});}body+=decoder.decode();}finally{reader.releaseLock();}
+      const release=JSON.parse(body),latest=version(release.tag_name),current=version(serverInfo.version);
+      if(!latest||!current||release.draft!==false||release.prerelease!==false)throw new Error('updateInvalid');
+      let comparison=0;for(let i=0;i<3;i++){if(latest[i]!==current[i]){comparison=latest[i]>current[i]?1:-1;break;}}
+      if(csrf===session&&updateCheck===controller)updateResult={key:comparison>0?'updateAvailable':comparison<0?'updateAhead':'updateCurrent',version:release.tag_name};
+    }catch(error){if(csrf===session&&updateCheck===controller)updateResult={key:['updateRateLimit','updateMissing','updateInvalid'].includes(error.message)?error.message:'updateFailed'};}
+    finally{clearTimeout(timeout);if(updateCheck===controller){updateCheck=null;$('check-update').disabled=false;renderUpdate();}}
   }
   function render() {
+    hideTooltip();
+    if(serverInfo){$('server-version').textContent=serverInfo.version;$('protocol-version').textContent=serverInfo.protocolVersion;}
+
     if(syncSettings){$('sync-metrics').replaceChildren();for(const key of metrics){const row=element('div');row.append(element('dt',t('metric'+key[0].toUpperCase()+key.slice(1))),element('dd',String(syncSettings.metrics?.[key]??'—')));$('sync-metrics').append(row);}if(!settingsDirty)$('backfill-window').value=syncSettings.backfillWindowMinutes;showError('sync-settings-error',syncSettings.configurationValid?'':t('backfillInvalid'));const last=syncSettings.audit[0];$('sync-settings-audit').textContent=last?`${t('backfillChanged')} ${last.actor} · ${new Intl.DateTimeFormat(document.documentElement.lang,{dateStyle:'medium',timeStyle:'short'}).format(new Date(last.changedAt*1000))} · ${last.oldValue??'—'} → ${last.newValue}`:t('backfillNoAudit');}
     const selected=$('filter').value;$('filter').replaceChildren(new Option(t('allAccounts'),''));
     accounts.forEach(a=>$('filter').add(new Option(a.username,a.id)));if([...$('filter').options].some(o=>o.value===selected))$('filter').value=selected;
@@ -121,7 +162,7 @@
       const row=element('tr');cell(row,'account',a.username);cell(row,'permissions',t(a.kind==='admin'?'admin':a.kind==='legacy'?'legacy':'deviceAccount'));cell(row,'devices',String(a.devices));
       const actions=cell(row,'actions');if(a.kind==='device')actions.append(button(t('revoke'),()=>openRevoke('account',a),'danger'));else actions.append(element('span',t('environment'),'small muted'));$('account-rows').append(row);
     }
-    for(const name of tabs)$(`${name}-panel`).hidden=tab!==name;$('filter').hidden=tab!=='devices';$('create-account').hidden=tab==='settings';
+    for(const name of tabs)$(`${name}-panel`).hidden=tab!==name;$('filter').hidden=tab!=='devices';$('create-account').hidden=tab==='settings'||tab==='about';
   }
   function setTab(value) {tab=value;for(const name of tabs){const b=$(`tab-${name}`);b.setAttribute('aria-selected',String(value===name));b.tabIndex=value===name?0:-1;}render();}
   function openRevoke(kind,value) {target={kind,value};$('revoke-description').textContent=t(kind==='device'?'deviceRevoke':'accountRevoke');$('revoke-target').textContent=kind==='device'?`${value.label||t('unnamed')}\n${value.deviceId}`:`${value.username}\n${t('devices')}: ${value.devices}`;showError('revoke-error','');$('revoke-dialog').showModal();$('revoke-dialog').querySelector('.dialog-actions .dialog-close').focus();}
@@ -138,6 +179,9 @@
   for(const value of tabs){$(`tab-${value}`).addEventListener('click',()=>setTab(value));$(`tab-${value}`).addEventListener('keydown',event=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){event.preventDefault();const next=event.key==='Home'?tabs[0]:event.key==='End'?tabs.at(-1):tabs[(tabs.indexOf(value)+(event.key==='ArrowRight'?1:tabs.length-1))%tabs.length];setTab(next);$(`tab-${next}`).focus();}});}
   $('backfill-window').addEventListener('input',()=>{settingsDirty=true;settingsEdit++;savedStatus=false;$('sync-settings-status').textContent='';});
   $('sync-settings-form').addEventListener('submit',event=>{event.preventDefault();submit(event.currentTarget,'sync-settings-error',async()=>{const edit=settingsEdit;const value=Number($('backfill-window').value);if(!Number.isInteger(value)||value<0||value>1440)throw new Error(t('badRequest'));await api('sync-settings','PUT',{backfillWindowMinutes:value});if(settingsEdit===edit){settingsDirty=false;savedStatus=true;$('sync-settings-status').textContent=t('backfillSaved');}await load();});});
+  $('check-update').addEventListener('click',checkUpdate);
+  $('sync-report-help').addEventListener('pointerenter',()=>clearTimeout(tooltipTimer));$('sync-report-help').addEventListener('pointerleave',scheduleTooltipHide);
+  document.addEventListener('keydown',event=>{if(event.key==='Escape')hideTooltip();});window.addEventListener('resize',hideTooltip);window.addEventListener('scroll',hideTooltip,{passive:true});
   $('filter').addEventListener('change',render);$('refresh').addEventListener('click',load);
   $('create-account').addEventListener('click',()=>{$('account-form').reset();$('account-password').type='password';$('reveal').textContent=t('showPassword');showError('account-error','');$('account-dialog').showModal();});
   $('generate').addEventListener('click',()=>{const bytes=crypto.getRandomValues(new Uint8Array(24));$('account-password').value=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');$('account-password').type='text';$('reveal').textContent=t('hidePassword');});

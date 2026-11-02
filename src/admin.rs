@@ -178,6 +178,7 @@ pub fn router() -> Router<Shared> {
         .route("/api/admin/session", get(session).post(session))
         .route("/api/admin/logout", post(logout))
         .route("/api/admin/devices", get(devices))
+        .route("/api/admin/about", get(about))
         .route(
             "/api/admin/devices/{id}",
             delete(revoke_device).patch(rename_device),
@@ -198,7 +199,7 @@ async fn security_headers(request: axum::http::Request<Body>, next: Next) -> Res
         ("cache-control", "no-store"),
         (
             "content-security-policy",
-            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' https://api.github.com; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
         ),
         ("x-frame-options", "DENY"),
         ("x-content-type-options", "nosniff"),
@@ -346,6 +347,11 @@ struct DeviceRow {
     online: bool,
     last_seen: Option<i64>,
     sync: DeviceSync,
+}
+async fn about(_: Admin) -> impl IntoResponse {
+    Json(
+        serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"protocolVersion":crate::direction::PROTOCOL}),
+    )
 }
 #[derive(Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]

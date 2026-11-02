@@ -1222,7 +1222,11 @@ async fn device_sync_diagnostics_are_effective_read_only_and_redacted() {
 async fn device_credentials_cannot_read_admin_diagnostics() {
     let (_, app) = app();
     let (_, bearer, _) = register(&app, "legacy", "fixture-legacy-password").await;
-    for path in ["/api/admin/devices", "/api/admin/sync-settings"] {
+    for path in [
+        "/api/admin/devices",
+        "/api/admin/sync-settings",
+        "/api/admin/about",
+    ] {
         for authorization in [
             &bearer,
             &basic("legacy", "fixture-legacy-password"),
@@ -1243,4 +1247,28 @@ async fn device_credentials_cannot_read_admin_diagnostics() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn about_version_requires_admin_and_contains_no_runtime_configuration() {
+    let (_, app) = app();
+    assert_eq!(
+        send(&app, Method::GET, "/api/admin/about", &[], Value::Null)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let (cookie, _) = login(&app).await;
+    let response = send(
+        &app,
+        Method::GET,
+        "/api/admin/about",
+        &[("cookie", &cookie)],
+        Value::Null,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let result = body(response).await;
+    assert_eq!(result, json!({"version":"3.0.0","protocolVersion":"3"}));
 }
