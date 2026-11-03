@@ -9,3 +9,5 @@
 .sync-tooltip{position:fixed;z-index:50;width:min(360px,calc(100vw - 24px));padding:12px 15px;border:1px solid var(--line);border-radius:5px;background:var(--surface);color:var(--ink);box-shadow:0 5px 18px #0002;font-size:.83rem;line-height:1.6;overflow-wrap:anywhere}.touch-help{display:none}#about-panel{max-width:900px}.version-info{display:grid;grid-template-columns:max-content 1fr;gap:12px 24px;margin:24px 0}.version-info dt{color:var(--muted)}.version-info dd{margin:0;font-variant-numeric:tabular-nums}.server-version>p{max-width:720px}.release-link{color:var(--accent);font-size:.9rem;text-underline-offset:3px}.toolbar .refresh-area{margin-left:auto}
 @media(hover:none){.sync-details .touch-help{display:block}}
 @media(max-width:800px){.tabs{gap:0}.tabs button{padding:12px 14px}.toolbar .refresh-area{margin-left:0}}
+
+.diagnostics-heading{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}.diagnostics-heading h2{margin:0}

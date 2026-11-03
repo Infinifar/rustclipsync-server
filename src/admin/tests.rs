@@ -1027,6 +1027,187 @@ async fn backfill_setting_requires_admin_csrf_valid_integer_and_audits_changes()
 }
 
 #[tokio::test]
+async fn reset_diagnostics_requires_confirmed_admin_and_preserves_sync_data() {
+    let (shared, app) = app();
+    let (cookie, csrf) = login(&app).await;
+    let (_, token, _) = register(&app, "legacy", "fixture-legacy-password").await;
+    let settings = "/api/admin/sync-settings";
+    let path = "/api/admin/diagnostics/reset";
+    let headers = [
+        ("cookie", cookie.as_str()),
+        ("origin", "https://admin.test"),
+        ("x-csrf-token", csrf.as_str()),
+    ];
+    let before = body(
+        send(
+            &app,
+            Method::GET,
+            settings,
+            &[("cookie", &cookie)],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert!(before["metrics"]["reports"].as_u64().unwrap() > 0);
+    let devices = body(
+        send(
+            &app,
+            Method::GET,
+            "/api/admin/devices",
+            &[("cookie", &cookie)],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    let changes = shared.db.lock().await.total_changes();
+    assert_eq!(
+        send(
+            &app,
+            Method::POST,
+            path,
+            &[("origin", "https://admin.test")],
+            json!({"confirm":true})
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send(
+            &app,
+            Method::POST,
+            path,
+            &[("origin", "https://admin.test"), ("authorization", &token)],
+            json!({"confirm":true})
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    for extra in [
+        vec![("cookie", cookie.as_str())],
+        vec![
+            ("cookie", cookie.as_str()),
+            ("origin", "https://evil.test"),
+            ("x-csrf-token", csrf.as_str()),
+        ],
+        vec![
+            ("cookie", cookie.as_str()),
+            ("origin", "https://admin.test"),
+            ("x-csrf-token", "wrong"),
+        ],
+    ] {
+        assert_eq!(
+            send(&app, Method::POST, path, &extra, json!({"confirm":true}))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        send(&app, Method::POST, path, &headers, json!({"confirm":false}))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert!(
+        send(
+            &app,
+            Method::POST,
+            path,
+            &headers,
+            json!({"confirm":true,"other":true})
+        )
+        .await
+        .status()
+        .is_client_error()
+    );
+    assert_eq!(
+        send(&app, Method::GET, path, &[("cookie", &cookie)], Value::Null)
+            .await
+            .status(),
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    let unchanged = body(
+        send(
+            &app,
+            Method::GET,
+            settings,
+            &[("cookie", &cookie)],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        unchanged, before,
+        "rejected reset requests cannot change counters"
+    );
+    let response = send(&app, Method::POST, path, &headers, json!({"confirm":true})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let cleared = body(response).await;
+    assert_eq!(cleared["metrics"]["reports"], 0);
+    let after = body(
+        send(
+            &app,
+            Method::GET,
+            settings,
+            &[("cookie", &cookie)],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    for (key, value) in after["metrics"].as_object().unwrap() {
+        if key != "backfillWindowMinutes" {
+            assert_eq!(value, 0, "counter {key}");
+        }
+    }
+    assert_eq!(after["audit"], before["audit"]);
+    assert_eq!(
+        after["backfillWindowMinutes"],
+        before["backfillWindowMinutes"]
+    );
+    assert_eq!(
+        body(
+            send(
+                &app,
+                Method::GET,
+                "/api/admin/devices",
+                &[("cookie", &cookie)],
+                Value::Null
+            )
+            .await
+        )
+        .await,
+        devices
+    );
+    assert_eq!(
+        shared.db.lock().await.total_changes(),
+        changes,
+        "reset must never mutate the database"
+    );
+    register(&app, "legacy", "fixture-legacy-password").await;
+    let resumed = body(
+        send(
+            &app,
+            Method::GET,
+            settings,
+            &[("cookie", &cookie)],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        resumed["metrics"]["reports"].as_u64().unwrap() > 0,
+        "new activity continues counting"
+    );
+}
+
+#[tokio::test]
 async fn corrupt_text_window_can_be_repaired_by_an_administrator() {
     let (shared, app) = app();
     let (cookie, csrf) = login(&app).await;

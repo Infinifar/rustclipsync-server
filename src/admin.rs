@@ -179,6 +179,7 @@ pub fn router() -> Router<Shared> {
         .route("/api/admin/logout", post(logout))
         .route("/api/admin/devices", get(devices))
         .route("/api/admin/about", get(about))
+        .route("/api/admin/diagnostics/reset", post(reset_diagnostics))
         .route(
             "/api/admin/devices/{id}",
             delete(revoke_device).patch(rename_device),
@@ -664,6 +665,26 @@ mod tests;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SyncSettingsInput {
     backfill_window_minutes: i64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResetDiagnosticsInput {
+    confirm: bool,
+}
+async fn reset_diagnostics(
+    State(app): State<Shared>,
+    _: Admin,
+    Json(input): Json<ResetDiagnosticsInput>,
+) -> Result<impl IntoResponse, StatusCode> {
+    if !input.confirm {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    // Serialize with normal routing updates/snapshots; no database writes occur.
+    let db = app.db.lock().await;
+    crate::direction::reset_statistics(&app.direction);
+    let metrics = crate::direction::statistics(&db, &app.direction);
+    tracing::info!(event = "sync.diagnostics.reset");
+    Ok(Json(serde_json::json!({"metrics":metrics})))
 }
 async fn sync_settings(
     State(app): State<Shared>,

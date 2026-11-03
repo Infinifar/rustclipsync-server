@@ -264,6 +264,24 @@ pub fn statistics(db: &Connection, rt: &Runtime) -> serde_json::Value {
     let m = &rt.metrics;
     serde_json::json!({"reports":m.reports.load(Ordering::Relaxed),"reportErrors":m.errors.load(Ordering::Relaxed),"wsReports":m.ws.load(Ordering::Relaxed),"httpReports":m.http.load(Ordering::Relaxed),"filtered":m.filtered.load(Ordering::Relaxed),"unknown":m.unknown.load(Ordering::Relaxed),"revocations":m.revoked.load(Ordering::Relaxed),"expired":m.expired.load(Ordering::Relaxed),"backfills":m.backfills.load(Ordering::Relaxed),"configurationAlerts":m.alerts.load(Ordering::Relaxed),"backfillWindowMinutes":window(db,rt)})
 }
+/// Clear process-lifetime diagnostic counts without changing routing or access state.
+pub(crate) fn reset_statistics(rt: &Runtime) {
+    let m = &rt.metrics;
+    for counter in [
+        &m.reports,
+        &m.errors,
+        &m.ws,
+        &m.http,
+        &m.filtered,
+        &m.unknown,
+        &m.revoked,
+        &m.expired,
+        &m.backfills,
+        &m.alerts,
+    ] {
+        counter.store(0, Ordering::Relaxed);
+    }
+}
 pub fn expire(db: &Connection, rt: &Runtime, now: i64) -> rusqlite::Result<()> {
     // Validate policy on read paths too: corrupt configuration must immediately
     // disable already-promoted offline candidates, not only future writes.

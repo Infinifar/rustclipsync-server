@@ -15,7 +15,7 @@ const screenshots=resolve(process.argv[3]||'target/admin-ui');
 const password='disposable-admin-password',devicePassword='disposable-device-password';
 const temp=await mkdtemp(join(tmpdir(),'rcs-admin-ui-'));
 let server,chrome,proxy,ws;
-let holdNextDeviceRequest=false,heldDeviceResponse;
+let holdNextDeviceRequest=false,heldDeviceResponse,settingsResponses=0;
 let releaseFixture={status:200,value:{tag_name:'v3.1.0',draft:false,prerelease:false}};const releaseRequests=[];
 const releaseUrl='https://api.github.com/repos/Infinifar/rustclipsync-server/releases/latest';
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
@@ -31,7 +31,7 @@ try {
     if(holdNextDeviceRequest && request.url==='/api/admin/devices'){
       holdNextDeviceRequest=false;heldDeviceResponse=response;request.resume();return;
     }
-    const upstream=http.request({hostname:'127.0.0.1',port:backend,path:request.url,method:request.method,headers:request.headers},result=>{response.writeHead(result.statusCode,result.headers);result.pipe(response);});
+    const upstream=http.request({hostname:'127.0.0.1',port:backend,path:request.url,method:request.method,headers:request.headers},result=>{response.writeHead(result.statusCode,result.headers);result.pipe(response);if(request.url==='/api/admin/sync-settings')result.on('end',()=>settingsResponses++);});
     upstream.on('error',()=>{response.writeHead(502);response.end();});request.pipe(upstream);
   });
   proxy.listen(0,'127.0.0.1');await once(proxy,'listening');
@@ -94,7 +94,7 @@ try {
   const summaryRect=await evaluate(`(()=>{const r=document.querySelector('#device-rows details summary').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
   await command('Input.dispatchMouseEvent',{type:'mouseMoved',...summaryRect});await wait(`!document.getElementById('sync-report-help').hidden`);
   await capture('device-tooltip',1440,1045);
-  await command('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape'});await command('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape'});
+  await command('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});await command('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
   assert.equal(await evaluate(`document.getElementById('sync-report-help').hidden`),true,'Escape dismisses tooltip');
   await command('Input.dispatchMouseEvent',{type:'mouseMoved',x:10,y:10});
   await evaluate(`document.querySelector('#device-rows details summary').focus()`);await wait(`!document.getElementById('sync-report-help').hidden`);
@@ -157,6 +157,27 @@ try {
   await click('#language');await capture('about-mobile-zh',390,844,true);await click('#language');
   assert.ok(await evaluate(`document.documentElement.scrollWidth<=window.innerWidth`),'About fits mobile');
   await command('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'dark'}]});await capture('about-dark',1440,1045);await command('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'light'}]});
+  const beforeReset=await evaluate(`fetch('/api/admin/sync-settings').then(r=>r.json())`);
+  const resetDevices=await evaluate(`fetch('/api/admin/devices').then(r=>r.json())`);
+  assert.ok(beforeReset.metrics.reports>0);
+  await click('#reset-statistics');await wait(`document.getElementById('reset-statistics-dialog').open`);
+  await click('#language');assert.equal(await evaluate(`document.getElementById('reset-statistics-title').textContent`),'清空诊断统计？');
+  await capture('reset-statistics-mobile-zh',390,844,true);await click('#language');
+  await command('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});await command('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+  await wait(`!document.getElementById('reset-statistics-dialog').open`);
+  assert.equal(await evaluate(`document.getElementById('reset-statistics-dialog').open`),false);
+  assert.deepEqual((await evaluate(`fetch('/api/admin/sync-settings').then(r=>r.json())`)).metrics,beforeReset.metrics,'cancel does not reset counters');
+  const responseCount=settingsResponses;holdNextDeviceRequest=true;await click('#refresh');
+  await until(()=>!!heldDeviceResponse && settingsResponses>responseCount,'old refresh held with its previous counters');
+  await click('#reset-statistics');await submit('reset-statistics-form');await wait(`!document.getElementById('reset-statistics-dialog').open`);
+  assert.deepEqual(await evaluate(`Array.from(document.querySelectorAll('#sync-metrics dd'),e=>e.textContent)`),Array(10).fill('0'));
+  heldDeviceResponse.writeHead(200,{'Content-Type':'application/json'});heldDeviceResponse.end(JSON.stringify(resetDevices));heldDeviceResponse=null;
+  await wait(`!document.getElementById('refresh').disabled`);
+  assert.deepEqual(await evaluate(`Array.from(document.querySelectorAll('#sync-metrics dd'),e=>e.textContent)`),Array(10).fill('0'),'stale refresh cannot restore pre-reset counts');
+  const afterReset=await evaluate(`fetch('/api/admin/sync-settings').then(r=>r.json())`);
+  assert.deepEqual(afterReset.audit,beforeReset.audit);assert.equal(afterReset.backfillWindowMinutes,beforeReset.backfillWindowMinutes);
+  assert.deepEqual(await evaluate(`fetch('/api/admin/devices').then(r=>r.json())`),resetDevices);
+  await capture('diagnostics-cleared',1440,1045);
   const ax=await command('Accessibility.getFullAXTree');assert.equal(ax.nodes.filter(n=>n.role?.value==='button'&&!n.name?.value).length,0,'buttons need accessible names');
   const cookies=await command('Network.getCookies',{urls:[origin]});const cookie=cookies.cookies.find(c=>c.name==='__Host-rcs-admin');assert.ok(cookie?.httpOnly&&cookie.secure&&cookie.sameSite==='Strict');
   assert.equal(await evaluate('localStorage.length+sessionStorage.length'),0,'no credentials in web storage');
@@ -189,7 +210,7 @@ try {
   assert.equal(await evaluate(`fetch('/api/admin/session').then(r=>r.status)`),200);
   await click('#logout');await wait(`!document.getElementById('login-panel').hidden`);
   assert.deepEqual(exceptions,[],'no browser runtime exceptions');assert.equal(remoteRequests.length,releaseRequests.length,'only explicit update checks may contact GitHub');assert.ok(remoteRequests.every(url=>url===releaseUrl),'no external assets or other destinations');
-  console.log('PASS: HTTPS admin login, multi-device account, presence, read-only sync diagnostics, four tabs/keyboard, hover/focus tooltip, dirty settings, About/version, bounded credential-free update checks, GitHub link, labels/XSS, CSRF, cookie flags, keyboard dialogs, account revocation, client isolation, logout and session replacement race');
+  console.log('PASS: HTTPS admin login, multi-device account, presence, read-only sync diagnostics, four tabs/keyboard, hover/focus tooltip, dirty settings, About/version, bounded credential-free update checks, confirmed diagnostics reset/cancel and stale refresh, GitHub link, labels/XSS, CSRF, cookie flags, keyboard dialogs, account revocation, client isolation, logout and session replacement race');
   console.log('Screenshots:',screenshots);
 } finally {
   if(ws)ws.close();

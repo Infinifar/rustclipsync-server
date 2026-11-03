@@ -14,7 +14,7 @@
     reportHelp:'Accepted means the server stored the direction; it does not prove the client received the confirmation. Activity expiry is separate from token validity. Acknowledgments include skipped messages and do not prove a clipboard write.',
     onlineHelp:'Online means authenticated activity within 60 seconds. An accepted direction and an active data lease do not prove that a client wrote to its system clipboard. Last activity is saved at most once per minute.',
     backfillHelp:'Keep only the latest eligible message per device. This global setting applies immediately to new messages; existing records retain their expiry. Set 0 to disable and clear offline backfill. Online delivery continues.',
-    diagnostics:'Server diagnostics',metricsHelp:'Routing counters since the server process started; they reset on restart. Backfills count selected candidates, not confirmed clipboard writes.',
+    diagnostics:'Server diagnostics',resetStatistics:'Clear statistics',resetStatisticsTitle:'Clear diagnostic statistics?',resetStatisticsHelp:'This clears routing counters only. Devices, pairing, clipboard content, pending deliveries, settings and audit records are retained. New activity will be counted immediately.',statisticsReset:'Diagnostic statistics cleared.',metricsHelp:'Routing counters since startup or the last reset; restart also resets them. Backfills count selected candidates, not confirmed clipboard writes.',
     metricReports:'Accepted reports',metricReportErrors:'Report errors',metricWsReports:'WS reports',metricHttpReports:'HTTP reports',metricFiltered:'Filtered deliveries',metricUnknown:'Unknown-state checks',metricRevocations:'Direction revocations',metricExpired:'Expired directions',metricBackfills:'Backfill candidates',metricConfigurationAlerts:'Configuration alerts',
     troubleshooting:'When a device is not receiving',checkProtocol:'Use a protocol-3 client and check its connection status.',checkDirection:'On Devices, check receive direction, pause, accepted report and data lease.',checkBackfill:'For reconnects, check the backfill window and expiry. New devices receive no prior history.',checkLocal:'Check client filters and sensitive-content settings. Sensitive text may stay in the inbox without changing the system clipboard.'
   });
@@ -26,7 +26,7 @@
     reportHelp:'已接受仅表示服务端保存了方向，不保证客户端收到确认。活动有效期与令牌有效性不同。确认包括已跳过的消息，不代表系统剪贴板已写入。',
     onlineHelp:'在线表示近 60 秒内有认证活动。方向已接受、数据租约有效均不代表客户端已写入系统剪贴板。最后活动时间最多每分钟持久化一次。',
     backfillHelp:'每台设备只保留最近一条满足条件的消息。全局设置，保存后立即用于新消息，已存消息保留原到期时间。设为 0 关闭并清除离线补发，在线实时同步继续生效。',
-    diagnostics:'服务端诊断',metricsHelp:'以下为本次服务端进程启动以来的分发计数，重启后归零。补发计数表示选中的候选消息，不代表已写入客户端剪贴板。',
+    diagnostics:'服务端诊断',resetStatistics:'清空统计',resetStatisticsTitle:'清空诊断统计？',resetStatisticsHelp:'仅清空分发计数，保留设备、配对、剪贴板内容、待分发消息、设置和审计记录。新的活动会立即重新计数。',statisticsReset:'诊断统计已清空。',metricsHelp:'以下为服务端启动或上次清空后的分发计数，重启也会归零。补发计数表示选中的候选消息，不代表已写入客户端剪贴板。',
     metricReports:'已接受上报',metricReportErrors:'上报错误',metricWsReports:'WS 上报',metricHttpReports:'HTTP 上报',metricFiltered:'过滤下发',metricUnknown:'未知状态检查',metricRevocations:'方向撤销',metricExpired:'方向过期',metricBackfills:'补发候选',metricConfigurationAlerts:'配置告警',
     troubleshooting:'设备无法接收时',checkProtocol:'使用协议 3 客户端，并检查客户端连接状态。',checkDirection:'在设备页检查接收方向、暂停状态、方向上报与数据租约。',checkBackfill:'重连时检查补发窗口与到期时间。新设备不会接收之前的历史。',checkLocal:'检查客户端过滤器与敏感内容设置。敏感文本可能仅保存在收件区，不写入系统剪贴板。'
   });
@@ -35,6 +35,7 @@
   const tabs=['devices','accounts','settings','about'];
   const metrics=['reports','reportErrors','wsReports','httpReports','filtered','unknown','revocations','expired','backfills','configurationAlerts'];
   let serverInfo=null,updateCheck=null,updateResult=null,tooltipOwner=null,tooltipTimer=null;
+  let metricsRevision=0;
   let syncSettings=null,settingsDirty=false,settingsEdit=0,lastNotice='',savedStatus=false,refreshedAt=null;
   let lang = 'en';
   let csrf = '', currentUser = '', tab = 'devices', devices = [], accounts = [], target = null, labelTarget = null, timer = null, lastTouch = 0, loadingSession = '';
@@ -78,9 +79,9 @@
     return value;
   }
   async function load() {
-    const session=csrf;
+    const session=csrf,revision=metricsRevision;
     if(!session || loadingSession===session)return;loadingSession=session;$('refresh').disabled=true;showError('page-error','');
-    try {const [nextDevices,nextAccounts,nextSettings,nextInfo]=await Promise.all([api('devices'),api('accounts'),api('sync-settings'),api('about')]);if(csrf!==session)return;devices=nextDevices;accounts=nextAccounts;syncSettings=nextSettings;serverInfo=nextInfo;render();refreshedAt=new Date();renderUpdated();}
+    try {const [nextDevices,nextAccounts,nextSettings,nextInfo]=await Promise.all([api('devices'),api('accounts'),api('sync-settings'),api('about')]);if(csrf!==session)return;devices=nextDevices;accounts=nextAccounts;if(revision!==metricsRevision&&syncSettings)nextSettings.metrics=syncSettings.metrics;syncSettings=nextSettings;serverInfo=nextInfo;render();refreshedAt=new Date();renderUpdated();}
     catch(error){if(csrf===session && !(error instanceof StaleSession))showError('page-error',error.message);}finally{if(loadingSession===session){loadingSession='';$('refresh').disabled=false;}}
   }
   async function signedIn(info) {
@@ -179,6 +180,12 @@
   for(const value of tabs){$(`tab-${value}`).addEventListener('click',()=>setTab(value));$(`tab-${value}`).addEventListener('keydown',event=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){event.preventDefault();const next=event.key==='Home'?tabs[0]:event.key==='End'?tabs.at(-1):tabs[(tabs.indexOf(value)+(event.key==='ArrowRight'?1:tabs.length-1))%tabs.length];setTab(next);$(`tab-${next}`).focus();}});}
   $('backfill-window').addEventListener('input',()=>{settingsDirty=true;settingsEdit++;savedStatus=false;$('sync-settings-status').textContent='';});
   $('sync-settings-form').addEventListener('submit',event=>{event.preventDefault();submit(event.currentTarget,'sync-settings-error',async()=>{const edit=settingsEdit;const value=Number($('backfill-window').value);if(!Number.isInteger(value)||value<0||value>1440)throw new Error(t('badRequest'));await api('sync-settings','PUT',{backfillWindowMinutes:value});if(settingsEdit===edit){settingsDirty=false;savedStatus=true;$('sync-settings-status').textContent=t('backfillSaved');}await load();});});
+  $('reset-statistics').addEventListener('click',()=>{if(!csrf)return;showError('reset-statistics-error','');$('reset-statistics-dialog').showModal();});
+  $('reset-statistics-form').addEventListener('submit',event=>{event.preventDefault();submit(event.currentTarget,'reset-statistics-error',async()=>{
+    $('reset-statistics').disabled=true;
+    try {const result=await api('diagnostics/reset','POST',{confirm:true});metricsRevision++;if(syncSettings)syncSettings.metrics=result.metrics;render();$('reset-statistics-dialog').close();notice('statisticsReset');}
+    finally {$('reset-statistics').disabled=false;}
+  });});
   $('check-update').addEventListener('click',checkUpdate);
   $('sync-report-help').addEventListener('pointerenter',()=>clearTimeout(tooltipTimer));$('sync-report-help').addEventListener('pointerleave',scheduleTooltipHide);
   document.addEventListener('keydown',event=>{if(event.key==='Escape')hideTooltip();});window.addEventListener('resize',hideTooltip);window.addEventListener('scroll',hideTooltip,{passive:true});

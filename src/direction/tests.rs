@@ -1,4 +1,52 @@
 use super::*;
+
+#[test]
+fn clearing_metrics_preserves_runtime_controls_and_counts_new_events() {
+    let rt = Runtime::default();
+    let m = &rt.metrics;
+    let counters = [
+        &m.reports,
+        &m.errors,
+        &m.ws,
+        &m.http,
+        &m.filtered,
+        &m.unknown,
+        &m.revoked,
+        &m.expired,
+        &m.backfills,
+        &m.alerts,
+    ];
+    for counter in counters {
+        counter.store(12, Ordering::Relaxed);
+    }
+    rt.warned.store(true, Ordering::Relaxed);
+    rt.rates
+        .lock()
+        .unwrap()
+        .insert("fixture".into(), (Instant::now(), 120));
+    let permit = rt.sockets.try_acquire().unwrap();
+    reset_statistics(&rt);
+    for counter in counters {
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+    assert!(
+        rt.warned.load(Ordering::Relaxed),
+        "reset must not re-arm configuration alerts"
+    );
+    assert_eq!(
+        rt.rates.lock().unwrap()["fixture"].1,
+        120,
+        "reset must not clear abuse limits"
+    );
+    assert_eq!(
+        rt.sockets.available_permits(),
+        31,
+        "reset must not release live sockets"
+    );
+    drop(permit);
+    m.reports.fetch_add(1, Ordering::Relaxed);
+    assert_eq!(m.reports.load(Ordering::Relaxed), 1);
+}
 use axum::{
     body::to_bytes,
     http::{Method, Request},
